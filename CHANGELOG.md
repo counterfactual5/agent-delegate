@@ -1,8 +1,8 @@
 # Changelog
 
-## [1.0.0] — 2026-06-05
+## [0.1.0] — 2026-06-05
 
-First stable release. Production-grade multi-agent orchestration with:
+Initial release. Production-grade multi-agent orchestration with:
 
 ### Added
 - **Router**: context-dependency analysis, 6-tier task classification, XML context packing.
