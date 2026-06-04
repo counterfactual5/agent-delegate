@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-delegate"
-version = "0.1.0"
+version = "0.2.0"
 description = "Production-grade multi-agent orchestration with intelligent task routing and pipeline workers"
 readme = "README.md"
 license = {text = "MIT"}
