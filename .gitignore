@@ -19,3 +19,4 @@ env/
 # OS / editor
 .DS_Store
 *.swp
+.github/workflows/
