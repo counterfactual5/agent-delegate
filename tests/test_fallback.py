@@ -5,7 +5,7 @@ sys.path.insert(0, ".")
 
 from src.router.router import Router
 from src.models.base import (
-    Task, TaskType, SpawnResult, WorkerOutput, RuntimeAdapter,
+    Task, SpawnResult, WorkerOutput, RuntimeAdapter,
     ErrorClass, classify_error,
 )
 

@@ -9,7 +9,7 @@ Agent Delegate - Production-grade multi-agent orchestration
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Callable
+from typing import Optional
 
 
 # ─── 数据模型 ─────────────────────────────────────────────

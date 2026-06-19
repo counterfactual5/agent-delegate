@@ -4,10 +4,8 @@ OpenClaw RuntimeAdapter 实现
 将 agent-delegate 的抽象接口映射到 OpenClaw 的 sessions_spawn / sessions_yield API。
 """
 
-import json
 import subprocess
 import os
-from typing import Optional
 
 from src.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
 

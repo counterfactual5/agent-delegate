@@ -7,7 +7,6 @@ Generic REST API RuntimeAdapter
 import json
 import urllib.request
 import urllib.error
-from typing import Optional
 
 from src.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
 
