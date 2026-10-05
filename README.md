@@ -6,97 +6,115 @@ This was extracted from a production AI assistant system. The focus is on schedu
 
 ## Features
 
-- **Smart routing**: Judges context dependency. Weak dependency tasks go to sub-agents; strong dependency tasks stay local.
-- **Task decomposition**: Parallel tasks spawn concurrently; serial tasks get bundled to reduce round-trips.
+- **Smart routing**: Judges context dependency. Weak dependency tasks go to sub-agents; strong dependency tasks stay with the main agent.
 - **Context isolation**: XML tags separate context / task / constraints so sub-agents aren't misled by data content.
-- **Model fallback chains**: Each task tier has 2-4 candidate models. On 429 / 500 / timeout, automatically switch. One provider down doesn't take down the whole system.
-- **Audit trail**: Every spawn logs attempts[] to memory for later tracing.
-- **Workspace isolation**: Sub-agents write only to their own directory, never the root.
+- **Model fallback chains**: Each task tier has candidate models across providers. Rate limits and auth errors skip the whole provider, 5xx retries the same model once, timeouts prefer faster candidates.
+- **Audit trail**: Every dispatch records its `attempts` list for later tracing.
+- **Pipelines with artifact gates**: Multi-stage workers check that each stage's input files exist before it runs and that its output files exist after it finishes.
 
-## Built-in Workers
+## Built-in Pipelines
 
-| Worker | Stages | Description |
-|--------|--------|-------------|
-| Coding | Planner → Builder → Reviewer → Consultant | Code pipeline with review |
-| Research | Searcher → Synthesizer → Fact-Checker → Reporter | Research pipeline with cross-validation |
-| Doc | Scanner → Planner → Expander → Editor → Render | Documentation pipeline |
-| QA | Global scan → High-risk sweep → Test execution | Security audit and testing |
-| Deploy | Environment check → Script execution → Asset inventory | Automated deployment |
+| Pipeline | Stages |
+|----------|--------|
+| `coding` | Planner → Builder → Reviewer → Consultant |
+| `research` | Searcher → Synthesizer → Fact-Checker → Reporter |
+| `doc` | Scanner → Planner → Section Expander → Merger → Quality Gate → Editor → Kami Brief → Render |
+
+They are available as `agent_delegate.PIPELINES`.
 
 ## Install
 
+The package is not published to PyPI yet. Install from a checkout:
+
 ```bash
-pip install agent-delegate
+pip install -e ".[dev]"
 ```
 
 ## Usage
 
 ```python
-from agent_delegate import Router
+from agent_delegate import Router, RESTAdapter
 
-router = Router(
-    adapter="openclaw",  # or "langchain", "openai", "custom"
-    models={
-        "light": "gemini-3-flash",
-        "standard": "gemini-3.1-pro",
-        "heavy": "gpt-5.1-codex",
-    }
-)
+adapter = RESTAdapter({
+    "base_url": "http://localhost:8080",
+    "headers": {"Authorization": "Bearer <token>"},
+})
+router = Router(adapter)
 
-result = router.dispatch("write me a Python scraper")
-# weak context dependency + coding task → delegated to Coding worker
+# 弱上下文依赖 → 派发给子 agent，返回 SpawnResult
+result = router.dispatch("implement a REST backend for a todo app")
+if result.status != "error":
+    output = adapter.listen(result.run_id, timeout_ms=300_000)  # 取结果
 
-result = router.dispatch("make this function async")
-# strong context dependency → handled by main agent
+# 强上下文依赖 → 返回字符串，建议主 agent 自己处理
+advice = router.dispatch("continue the previous refactor")
 ```
+
+`Router.dispatch_with_fallback(task)` takes a `Task` and walks the fallback chain for its task type, returning a `SpawnResult` whose `model` and `attempts` show which candidate succeeded.
+
+### Running a pipeline
+
+```python
+from agent_delegate import PIPELINES, PipelineRunner, Router, OpenClawAdapter
+
+runner = PipelineRunner(Router(OpenClawAdapter()), workdir="./run")
+result = runner.run(PIPELINES["coding"], "build a CLI todo app")
+
+if not result.success:
+    print(result.failed_stage.name, result.failed_stage.error)
+```
+
+Each stage is dispatched through the router's fallback chain for its `model_tier` (`light`, `standard`, `heavy`). The chain comes from `Router.select_model()`, so a custom `Router(chains=...)` is respected. Model and provider failures are handled by the chain; a worker that reports failure or skips its output files is re-dispatched up to the stage's `max_retries`. The run stops at the first failed stage.
+
+Output artifacts must be created or modified during the current attempt — pre-existing files and leftovers from failed tries don't count as delivery. Paths ending in `/` must be non-empty directories.
 
 ## Custom Runtime
 
 ```python
-from agent_delegate import RuntimeAdapter
+from agent_delegate import RuntimeAdapter, SpawnResult, WorkerOutput
 
 class MyAdapter(RuntimeAdapter):
-    def spawn(self, task: str, model: str, **kwargs) -> str:
-        """Create a sub-agent, return run_id"""
+    def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
+        """Submit the task and return a handle (run_id)."""
         ...
 
-    def listen(self, run_id: str) -> str:
-        """Wait for sub-agent to finish, return result"""
+    def listen(self, run_id: str, timeout_ms: int = 30000) -> WorkerOutput:
+        """Return the result for run_id, waiting if needed."""
         ...
 
-    def send(self, message: str, channel: str = "default") -> None:
-        """Send message to user"""
+    def send(self, message: str, **kwargs) -> None:
+        """Send a message to the user."""
         ...
 
-router = Router(adapter=MyAdapter())
+    def list_runs(self, **kwargs) -> list:
+        """List active runs."""
+        ...
 ```
+
+Callers always call `listen()` after a successful `spawn()`. Runtimes that execute synchronously store the result in `spawn()` and return it from `listen()`, as `OpenClawAdapter` does. `Router.dispatch()` returns a `SpawnResult`; check `status` before calling `listen()`.
 
 ## Project Structure
 
 ```
 agent-delegate/
-├── src/
-│   ├── router/          # Dispatcher
-│   │   ├── decision.py  # Context dependency analysis + task classification
-│   │   ├── fallback.py  # Model candidate chain + degradation strategy
-│   │   └── context.py   # Context packing protocol
-│   ├── workers/         # Worker definitions
-│   │   ├── coding/
-│   │   ├── research/
-│   │   ├── doc/
-│   │   └── qa/
-│   ├── adapters/        # Runtime adapter layer
-│   │   ├── base.py
-│   │   ├── openclaw.py
-│   │   ├── langchain.py
-│   │   └── openai.py
-│   └── models/          # Data models
-│       ├── task.py
-│       └── pipeline.py
-├── workers/             # Standalone worker scripts (can run directly)
-├── scripts/             # Pipeline execution scripts
-├── examples/            # Usage examples
-└── docs/                # Detailed documentation
+├── src/agent_delegate/
+│   ├── __init__.py        # Public API
+│   ├── models/base.py     # Task, fallback chains, error classes, RuntimeAdapter
+│   ├── router/router.py   # Context analysis, classification, packing, fallback dispatch
+│   ├── workers/
+│   │   ├── pipelines.py   # Stage and pipeline definitions
+│   │   └── runner.py      # PipelineRunner
+│   └── adapters/
+│       ├── openclaw.py    # OpenClaw CLI runtime
+│       └── rest.py        # Generic REST runtime
+└── tests/
+```
+
+## Development
+
+```bash
+pytest
+ruff check .
 ```
 
 ## License
