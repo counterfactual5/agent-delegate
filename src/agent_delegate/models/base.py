@@ -119,6 +119,10 @@ class RuntimeAdapter(ABC):
     
     所有具体的 runtime（OpenClaw / LangChain / OpenAI / 自定义）
     都需要实现这 4 个方法。
+
+    调用契约：spawn() 只负责提交任务并返回句柄；只要 status 不是 "error"，
+    调用方都必须再调 listen(run_id) 取结果。同步执行的 runtime 也遵守这一点
+    （在 spawn 内暂存结果，由 listen 返回），调用方无需区分同步还是异步。
     """
 
     @abstractmethod

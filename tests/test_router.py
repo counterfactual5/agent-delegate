@@ -1,10 +1,7 @@
 """测试 Router 决策逻辑"""
 
-import sys
-sys.path.insert(0, ".")
-
-from src.router.router import Router
-from src.models.base import (
+from agent_delegate.router.router import Router
+from agent_delegate.models.base import (
     Task, TaskType, ContextDependency,
     SpawnResult, RuntimeAdapter,
 )
@@ -15,7 +12,7 @@ class MockAdapter(RuntimeAdapter):
     def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
         return SpawnResult(run_id="test-123", status="completed")
     def listen(self, run_id: str, timeout_ms: int = 30000):
-        from src.models.base import WorkerOutput
+        from agent_delegate.models.base import WorkerOutput
         return WorkerOutput(success=True, summary="Done")
     def send(self, message: str, **kwargs) -> None:
         pass

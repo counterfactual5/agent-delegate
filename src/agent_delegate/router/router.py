@@ -9,7 +9,7 @@ Router - 调度大脑
 
 import re
 
-from src.models.base import (
+from agent_delegate.models.base import (
     Task, TaskType, ContextDependency, FallbackChain, DEFAULT_CHAINS, SpawnResult, RuntimeAdapter, ErrorClass, classify_error,
 )
 
@@ -19,7 +19,7 @@ class Router:
 
     def __init__(self, adapter: RuntimeAdapter, chains: dict = None):
         self.adapter = adapter
-        self.chains = chains or DEFAULT_CHAINS
+        self.chains = chains if chains is not None else DEFAULT_CHAINS
 
     # ─── 决策 1: 上下文依赖分析 ──────────────────────
 
@@ -96,7 +96,9 @@ class Router:
 
     def select_model(self, task_type: TaskType) -> FallbackChain:
         """返回该任务类型的候选链"""
-        return self.chains.get(task_type, self.chains[TaskType.STANDARD])
+        if task_type in self.chains:
+            return self.chains[task_type]
+        return self.chains.get(TaskType.STANDARD)
 
     # ─── 上下文打包 ─────────────────────────────────
 
@@ -160,7 +162,9 @@ class Router:
 
     # ─── 带降级的派发 ──────────────────────────────
 
-    def dispatch_with_fallback(self, task: Task, context: str = None) -> SpawnResult:
+    def dispatch_with_fallback(
+        self, task: Task, context: str = None, chain: FallbackChain = None,
+    ) -> SpawnResult:
         """
         带自动降级的派发，按错误类型选择降级策略：
 
@@ -170,10 +174,13 @@ class Router:
         - UNKNOWN：顺序降级到下一候选。
 
         provider 级隔离确保 Gemini 配额耗尽不会拖累 GPT，反之亦然。
+
+        传入 chain 时跳过任务分类，直接使用该候选链（PipelineRunner 按阶段档位选链时使用）。
         """
         task.context_dependency = self.analyze_context(task)
-        task.task_type = self.classify_task(task)
-        chain = self.select_model(task.task_type)
+        if chain is None:
+            task.task_type = self.classify_task(task)
+            chain = self.select_model(task.task_type)
 
         packed = self.pack_context(
             context=context or "（无额外上下文）",

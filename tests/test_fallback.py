@@ -1,10 +1,7 @@
 """测试按错误类型降级的 dispatch_with_fallback。"""
 
-import sys
-sys.path.insert(0, ".")
-
-from src.router.router import Router
-from src.models.base import (
+from agent_delegate.router.router import Router
+from agent_delegate.models.base import (
     Task, SpawnResult, WorkerOutput, RuntimeAdapter,
     ErrorClass, classify_error,
 )
