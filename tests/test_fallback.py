@@ -114,10 +114,12 @@ def test_success_records_attempts():
     router = Router(ScriptedAdapter({}))
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
-    assert result.attempts[-1].startswith("ok ")
+    assert result.attempts[-1].outcome == "ok"
+    assert str(result.attempts[-1]).startswith("ok ")
     # 验证 AttemptRecord 类型与字段
     attempt = result.attempts[-1]
     assert attempt.outcome == "ok"
+    assert attempt.status == "completed"
     assert attempt.model == "gemini-pro-high"
     assert attempt.provider == "gemini"
 
@@ -134,8 +136,57 @@ def test_failure_and_skip_records_attempts():
     assert len(result.attempts) >= 3
     first_attempt = result.attempts[0]
     assert first_attempt.outcome == "fail"
+    assert first_attempt.status == "error"
     assert first_attempt.model == "gemini-pro-high"
     assert first_attempt.provider == "gemini"
     assert first_attempt.error_class == "rate_limit"
     assert "429" in (first_attempt.error or "")
     assert str(first_attempt).startswith("fail gemini-pro-high [rate_limit]")
+
+
+def test_adapter_exception_handled_as_failure():
+    """adapter 抛出异常时不应崩溃，应转为 error 并进入降级流程记录审计日志。"""
+    class CrashingAdapter(RuntimeAdapter):
+        def __init__(self):
+            self.calls = []
+
+        def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
+            self.calls.append(model)
+            if model == "gemini-pro-high":
+                raise ConnectionResetError("network dropped")
+            return SpawnResult(run_id="ok-fallback", status="completed")
+
+        def listen(self, run_id: str, timeout_ms: int = 30000) -> WorkerOutput:
+            return WorkerOutput(success=True, summary="Done")
+
+        def send(self, message: str, **kwargs) -> None:
+            pass
+
+        def list_runs(self, **kwargs) -> list:
+            return []
+
+    adapter = CrashingAdapter()
+    router = Router(adapter)
+    result = router.dispatch_with_fallback(_coding_task())
+    assert result.status == "completed"
+    assert result.model == "gpt-codex"
+    assert adapter.calls == ["gemini-pro-high", "gpt-codex"]
+    assert len(result.attempts) >= 2
+    failed_attempt = result.attempts[0]
+    assert failed_attempt.outcome == "fail"
+    assert failed_attempt.status == "error"
+    assert failed_attempt.model == "gemini-pro-high"
+    assert "ConnectionResetError: network dropped" in (failed_attempt.error or "")
+
+
+def test_non_terminal_status_preserved_in_attempts():
+    """pending/running 等非终态 status 应在 AttemptRecord 中原样保留，而非默认被覆盖。"""
+    adapter = ScriptedAdapter({
+        "gemini-pro-high": SpawnResult(run_id="run-1", status="pending", error="still processing"),
+    })
+    router = Router(adapter)
+    result = router.dispatch_with_fallback(_coding_task())
+    assert result.status == "completed"
+    first_attempt = result.attempts[0]
+    assert first_attempt.outcome == "fail"
+    assert first_attempt.status == "pending"

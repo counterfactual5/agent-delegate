@@ -6,8 +6,11 @@ OpenClaw RuntimeAdapter 实现
 
 import subprocess
 import os
+from collections import OrderedDict
 
 from src.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
+
+_MAX_CACHED_RUNS = 100
 
 
 class OpenClawAdapter(RuntimeAdapter):
@@ -17,7 +20,7 @@ class OpenClawAdapter(RuntimeAdapter):
         self.agent_id = agent_id
         self.session_prefix = session_prefix
         self._openclaw_bin = os.environ.get("OPENCLAW_BIN", "openclaw")
-        self._completed_runs = {}  # Cache results from blocking spawn calls
+        self._completed_runs = OrderedDict()  # Cache results from blocking spawn calls
 
     def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
         """通过 openclaw agent CLI 创建子 agent"""
@@ -45,19 +48,25 @@ class OpenClawAdapter(RuntimeAdapter):
                 run_id = lines[-1] if lines else "unknown"
                 output_summary = "\n".join(lines[:-1]) if len(lines) > 1 else "completed"
                 
-                # Cache the result for listen() to retrieve
-                self._completed_runs[run_id] = WorkerOutput(
-                    success=True,
-                    summary=output_summary,
-                )
+                # Cache the result for listen() to retrieve, avoiding sentinel/empty run_id
+                if run_id and run_id != "unknown":
+                    self._completed_runs[run_id] = WorkerOutput(
+                        success=True,
+                        summary=output_summary,
+                    )
+                    if len(self._completed_runs) > _MAX_CACHED_RUNS:
+                        self._completed_runs.popitem(last=False)
                 return SpawnResult(run_id=run_id, status="completed")
             else:
                 error_msg = result.stderr[:500] if result.stderr else "Unknown error"
                 return SpawnResult(run_id="", status="error", error=error_msg)
         except subprocess.TimeoutExpired:
             return SpawnResult(run_id="", status="error", error="Timeout")
+        except (ConnectionError, TimeoutError, RuntimeError, ValueError, OSError) as e:
+            return SpawnResult(run_id="", status="error", error=f"adapter raised: {type(e).__name__}: {e}")
         except Exception as e:
-            return SpawnResult(run_id="", status="error", error=str(e))
+            # Programming errors: re-raise
+            raise
 
     def listen(self, run_id: str, timeout_ms: int = 30000) -> WorkerOutput:
         """OpenClaw 模式下，spawn 本身是阻塞的，结果已缓存"""

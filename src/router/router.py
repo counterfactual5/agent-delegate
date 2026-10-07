@@ -167,7 +167,7 @@ class Router:
 
     # ─── 带降级的派发 ──────────────────────────────
 
-    def dispatch_with_fallback(self, task: Task, context: str = None) -> SpawnResult:
+    def dispatch_with_fallback(self, task: Task, context: str = None, wait: bool = True) -> SpawnResult:
         """
         带自动降级的派发，按错误类型选择降级策略：
 
@@ -218,11 +218,23 @@ class Router:
                 ))
                 continue
 
-            result = self.adapter.spawn(
-                task=packed,
-                model=candidate.model_id,
-                timeout_seconds=task.timeout_seconds,
-            )
+            try:
+                result = self.adapter.spawn(
+                    task=packed,
+                    model=candidate.model_id,
+                    timeout_seconds=task.timeout_seconds,
+                    wait=True,
+                )
+            except (ConnectionError, TimeoutError, RuntimeError, ValueError, OSError) as e:
+                # Network/runtime errors: convert to classified failure
+                result = SpawnResult(
+                    run_id="",
+                    status="error",
+                    error=f"adapter raised: {type(e).__name__}: {e}",
+                )
+            except Exception as e:
+                # Programming errors (TypeError, AttributeError, etc.): re-raise to surface bugs
+                raise
 
             if result.status == "completed":
                 result.model = candidate.model_id
@@ -230,6 +242,7 @@ class Router:
                     model=candidate.model_id,
                     provider=candidate.provider,
                     outcome="ok",
+                    status=result.status,
                 ))
                 result.attempts = attempts
                 return result
@@ -239,6 +252,7 @@ class Router:
                 model=candidate.model_id,
                 provider=candidate.provider,
                 outcome="fail",
+                status=result.status,
                 error_class=err_class.value,
                 error=result.error or None,
             ))

@@ -9,7 +9,9 @@ This was extracted from a production AI assistant system. The focus is on schedu
 - **Smart routing**: Judges context dependency. Weak dependency tasks go to sub-agents; strong dependency tasks stay local.
 - **Context isolation**: XML tags separate context / task / constraints so sub-agents aren't misled by data content.
 - **Model fallback chains**: Each task tier has 2-3 candidate models. On 429 / 500 / timeout, automatically switch. One provider down doesn't take down the whole system.
-- **Error classification**: Distinguishes rate limits, server errors, timeouts, and auth failures to choose the right fallback strategy.
+- **Error classification & adaptive fallback**: Distinguishes rate limits, auth failures, server errors, timeouts, and context-length overflow (`ErrorClass.CONTEXT_LENGTH` automatically falls back to larger-window models). Router blacklists failing providers on 429/auth, retries 5xx once, and favors faster candidates on timeout.
+- **Structured audit trail (`AttemptRecord`)**: Tracks every attempt with structured metadata (`model`, `provider`, `outcome`, `status`, `error_class`, `reason`), preserving clean readable string representations via `__str__`.
+- **Pipeline execution (`PipelineRunner`)**: Orchestrates multi-stage workflows (Coding, Research, Doc) with dependency input gates, cascading skips, stage retries, and comprehensive execution tracking (`PipelineRun`).
 
 ## Built-in Workers
 
@@ -60,6 +62,28 @@ result = router.dispatch("compare the last two outputs")
 # strong context dependency ("last two") → handled by main agent
 ```
 
+### PipelineRunner
+
+Execute predefined multi-stage pipelines with dependency gate validation and stage retries:
+
+```python
+from src.router.router import Router
+from src.adapters.openclaw import OpenClawAdapter
+from src.workers.runner import PipelineRunner
+from src.workers.pipelines import StageStatus
+
+router = Router(adapter=OpenClawAdapter())
+runner = PipelineRunner(router)
+
+# Run the 4-stage coding pipeline (Planner → Builder → Reviewer → Consultant)
+run = runner.run("coding", context="Build a rate-limited HTTP client")
+
+if run.status == StageStatus.COMPLETED:
+    print(f"Pipeline finished successfully. Artifacts: {run.artifacts}")
+else:
+    print(f"Pipeline failed ({run.status.value}): {run.error}")
+```
+
 ## Custom Runtime
 
 ```python
@@ -97,7 +121,8 @@ agent-delegate/
 │   ├── router/
 │   │   └── router.py        # Dispatcher, context analysis, task classification, fallback logic
 │   ├── workers/
-│   │   └── pipelines.py     # Pipeline and stage definitions (coding, research, doc)
+│   │   ├── pipelines.py     # Pipeline and stage definitions (coding, research, doc)
+│   │   └── runner.py        # Pipeline execution engine (gates, retries, cascade skips)
 │   ├── adapters/
 │   │   ├── openclaw.py      # OpenClaw CLI adapter
 │   │   └── rest.py          # Generic REST adapter

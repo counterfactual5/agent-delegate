@@ -77,7 +77,7 @@ _ERROR_SIGNATURES: list[tuple[ErrorClass, tuple[str, ...]]] = [
                        "api key", "认证", "鉴权", "密钥")),
     (ErrorClass.CONTEXT_LENGTH, ("context length", "context_length", "token limit", 
                                  "maximum context", "too long", "上下文长度", 
-                                 "令牌数超限", "exceeds", "context window")),
+                                 "令牌数超限", "exceeds context", "context window")),
     (ErrorClass.TIMEOUT, ("timeout", "timed out", "deadline", "超时")),
     (ErrorClass.SERVER_ERROR, ("500", "502", "503", "504", "internal server",
                                "bad gateway", "unavailable", "服务不可用")),
@@ -103,6 +103,7 @@ class AttemptRecord:
     model: str
     provider: str
     outcome: str  # ok | fail | skip
+    status: Optional[str] = None
     error_class: Optional[str] = None
     error: Optional[str] = None
     reason: Optional[str] = None
@@ -117,15 +118,6 @@ class AttemptRecord:
         err_cls = f" [{self.error_class}]" if self.error_class else ""
         err_msg = f" {self.error}" if self.error else ""
         return f"{self.outcome} {self.model}{err_cls}{err_msg}".strip()
-
-    def startswith(self, prefix: str) -> bool:
-        return str(self).startswith(prefix)
-
-    def __contains__(self, item: str) -> bool:
-        return item in str(self)
-
-    def lower(self) -> str:
-        return str(self).lower()
 
 
 @dataclass

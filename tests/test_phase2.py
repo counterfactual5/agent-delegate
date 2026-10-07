@@ -21,6 +21,7 @@ def test_context_length_error_classification():
         ("上下文长度超限", ErrorClass.CONTEXT_LENGTH),
         ("context_length error", ErrorClass.CONTEXT_LENGTH),
         ("input too long", ErrorClass.CONTEXT_LENGTH),
+        ("prompt exceeds context window", ErrorClass.CONTEXT_LENGTH),
     ]
     
     for error_text, expected_class in test_cases:
@@ -97,8 +98,8 @@ def test_context_length_fallback():
     assert call_count[0] == 2  # small-model 失败 + large-model 成功
     
     # 检查 attempts 日志
-    assert 'context_length' in result.attempts[0].lower()
-    assert 'large-model' in result.attempts[1]
+    assert result.attempts[0].error_class == 'context_length'
+    assert result.attempts[1].model == 'large-model'
     
     print("✓ Context length fallback test passed")
 
@@ -134,8 +135,22 @@ def test_all_error_classifications():
     print(f"✓ All {len(test_cases)} error classifications passed")
 
 
+def test_exceeds_classification_tightened():
+    """验证移除裸 'exceeds' 后的负向用例，避免配额类或其它非上下文错误被误判为 CONTEXT_LENGTH。"""
+    # 裸 "exceeds" 不再匹配 CONTEXT_LENGTH
+    res_generic = SpawnResult(run_id='t1', status='error', error="exceeds limit")
+    assert classify_error(res_generic) == ErrorClass.UNKNOWN
+    assert classify_error(res_generic) != ErrorClass.CONTEXT_LENGTH
+
+    # "quota exceeds limit" 包含 quota 关键字，归为 RATE_LIMIT，且绝非 CONTEXT_LENGTH
+    res_quota = SpawnResult(run_id='t2', status='error', error="quota exceeds limit")
+    assert classify_error(res_quota) == ErrorClass.RATE_LIMIT
+    assert classify_error(res_quota) != ErrorClass.CONTEXT_LENGTH
+
+
 if __name__ == "__main__":
     test_context_length_error_classification()
     test_context_length_fallback()
     test_all_error_classifications()
+    test_exceeds_classification_tightened()
     print("\n✅ All Phase 2 tests passed!")

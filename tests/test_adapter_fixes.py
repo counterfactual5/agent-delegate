@@ -1,4 +1,7 @@
 """回归测试 - 验证已修复的 4 个 bug"""
+import sys
+sys.path.insert(0, ".")
+
 
 import pytest
 from unittest.mock import Mock
@@ -67,7 +70,7 @@ class TestSuccessDetection:
         result = router.dispatch_with_fallback(task)
 
         assert result.status == "completed"
-        assert "ok" in result.attempts[0]
+        assert result.attempts[0].outcome == "ok"
 
     def test_error_with_run_id_triggers_fallback(self):
         router = Router(adapter=Mock())
