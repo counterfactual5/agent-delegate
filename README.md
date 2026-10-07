@@ -6,7 +6,7 @@ This was extracted from a production AI assistant system. The focus is on schedu
 
 ## Features
 
-- **Smart routing**: Judges context dependency. Weak dependency tasks go to sub-agents; strong dependency tasks stay local.
+- **Caller-driven dispatch**: The caller decides what to run and which model (`model_override` or a task-type chain); the framework handles execution — retry, provider isolation, degradation, audit.
 - **Context isolation**: XML tags separate context / task / constraints so sub-agents aren't misled by data content.
 - **Model fallback chains**: Each task tier has 2-3 candidate models. On 429 / 500 / timeout, automatically switch. One provider down doesn't take down the whole system.
 - **Error classification & adaptive fallback**: Distinguishes rate limits, auth failures, server errors, timeouts, and context-length overflow (`ErrorClass.CONTEXT_LENGTH` automatically falls back to larger-window models). Router blacklists failing providers on 429/auth, retries 5xx once, and favors faster candidates on timeout.
@@ -55,11 +55,19 @@ router = Router(adapter=RESTAdapter(
     send_endpoint="/agents/message"
 ))
 
-result = router.dispatch("implement a retry decorator with exponential backoff")
-# coding keywords detected → routed to coding model tier
+# Caller declares the task type; Router looks up the chain and handles fallback
+from src.models.base import Task, TaskType
 
-result = router.dispatch("compare the last two outputs")
-# strong context dependency ("last two") → handled by main agent
+result = router.dispatch_with_fallback(
+    Task(description="implement a retry decorator", task_type=TaskType.CODING)
+)
+# On 429 → blacklist that provider; on 5xx → retry once; on timeout → prefer faster
+# result.attempts holds the structured audit trail
+
+# Or pin one specific model, bypassing chain lookup entirely
+result = router.dispatch_with_fallback(
+    Task(description="quick check", model_override="claude-sonnet-5.5")
+)
 ```
 
 ### PipelineRunner

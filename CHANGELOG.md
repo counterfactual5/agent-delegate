@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+### Removed
+- **Decision layer**: `analyze_context`, `classify_task`, `dispatch`, and the
+  `ContextDependency` enum. Decision-making belongs to the caller (LLM or config);
+  the framework is now a pure execution engine. Use `load_chains()` for
+  config-driven chain selection.
+
 ### Added
 - **PipelineRunner**: Multi-stage pipeline execution engine (`src/workers/runner.py`) for Coding, Research, and Doc pipelines with `input_gates` dependency validation, cascade skips, configurable `max_retries`, and `PipelineRun`/`StageRun` audit records.
 - **AttemptRecord**: Structured dataclass in `src/models/base.py` tracking model fallback audit trails (`model`, `provider`, `outcome`, `error_class`, `reason`), replacing plain string concatenation; `str(record)` preserves the readable one-line summary.
 - **Context Length Error Handling**: Added `ErrorClass.CONTEXT_LENGTH` to error classification signatures and adaptive router fallback to automatically switch to models with larger context windows when token limits are exceeded.
 - **RESTAdapter kwargs configuration**: Flexible kwargs configuration for base URL, headers, and endpoints; `wait=True` semantics available via `RESTAdapter.spawn(wait=True)` which polls until terminal status.
-- **ContextDependency.NONE**: Added explicit `ContextDependency.NONE` enum variant for tasks with no dependency on conversational context.
 
 ### Fixed
 - **OpenClaw WorkerOutput fields**: Standardized cached `WorkerOutput` construction in `OpenClawAdapter` to align with base model field expectations.
