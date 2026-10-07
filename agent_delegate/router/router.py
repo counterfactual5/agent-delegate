@@ -7,7 +7,7 @@ The Router handles HOW: retries, provider isolation, degradation,
 and audit trail.
 """
 
-from src.models.base import (
+from agent_delegate.models.base import (
     Task, TaskType, FallbackChain, ModelCandidate, DEFAULT_CHAINS, SpawnResult,
     RuntimeAdapter, ErrorClass, classify_error, AttemptRecord,
 )

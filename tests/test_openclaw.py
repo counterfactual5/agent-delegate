@@ -4,8 +4,8 @@ sys.path.insert(0, ".")
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from src.adapters.openclaw import OpenClawAdapter, _MAX_CACHED_RUNS
-from src.models.base import SpawnResult, WorkerOutput
+from agent_delegate.adapters.openclaw import OpenClawAdapter, _MAX_CACHED_RUNS
+from agent_delegate.models.base import SpawnResult, WorkerOutput
 
 
 def test_spawn_success_with_run_id_caches_and_listen_hits():

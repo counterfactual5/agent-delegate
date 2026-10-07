@@ -5,9 +5,9 @@ sys.path.insert(0, ".")
 
 import pytest
 from unittest.mock import Mock
-from src.adapters.rest import RESTAdapter
-from src.router.router import Router
-from src.models.base import Task, TaskType, SpawnResult
+from agent_delegate.adapters.rest import RESTAdapter
+from agent_delegate.router.router import Router
+from agent_delegate.models.base import Task, TaskType, SpawnResult
 
 
 class TestNullErrorHandling:

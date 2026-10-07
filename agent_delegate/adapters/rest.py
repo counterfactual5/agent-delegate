@@ -8,7 +8,7 @@ import json
 import urllib.request
 import urllib.error
 
-from src.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
+from agent_delegate.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
 
 
 class RESTAdapter(RuntimeAdapter):

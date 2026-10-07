@@ -8,9 +8,9 @@ import copy
 from dataclasses import dataclass, field
 from typing import Optional, Set
 
-from src.models.base import SpawnResult, Task, TaskType
-from src.router.router import Router
-from src.workers.pipelines import PIPELINES, Pipeline, Stage, StageStatus
+from agent_delegate.models.base import SpawnResult, Task, TaskType
+from agent_delegate.router.router import Router
+from agent_delegate.workers.pipelines import PIPELINES, Pipeline, Stage, StageStatus
 
 
 @dataclass

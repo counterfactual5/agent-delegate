@@ -9,10 +9,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.models.base import RuntimeAdapter, SpawnResult
-from src.router.router import Router
-from src.workers.pipelines import PIPELINES, Pipeline, Stage, StageStatus
-from src.workers.runner import PipelineRun, PipelineRunner, StageRun
+from agent_delegate.models.base import RuntimeAdapter, SpawnResult
+from agent_delegate.router.router import Router
+from agent_delegate.workers.pipelines import PIPELINES, Pipeline, Stage, StageStatus
+from agent_delegate.workers.runner import PipelineRun, PipelineRunner, StageRun
 
 
 class MockAdapter(RuntimeAdapter):

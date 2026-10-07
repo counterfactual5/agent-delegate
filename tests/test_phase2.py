@@ -4,8 +4,8 @@ import sys
 sys.path.insert(0, ".")
 
 from unittest.mock import Mock
-from src.router.router import Router
-from src.models.base import (
+from agent_delegate.router.router import Router
+from agent_delegate.models.base import (
     Task, TaskType, SpawnResult, 
     FallbackChain, ModelCandidate,
     classify_error, ErrorClass,

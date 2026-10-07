@@ -3,7 +3,7 @@ import sys
 sys.path.insert(0, ".")
 
 from unittest.mock import Mock, patch
-from src.adapters.rest import RESTAdapter
+from agent_delegate.adapters.rest import RESTAdapter
 
 
 def _adapter():

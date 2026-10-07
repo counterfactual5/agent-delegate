@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 
-from src.models.base import load_chains, TaskType
+from agent_delegate.models.base import load_chains, TaskType
 
 
 def _write(content: str, suffix: str) -> str:
@@ -42,8 +42,8 @@ def test_load_json_chains():
 
 def test_load_chains_usable_by_router():
     """Loaded chains plug straight into Router."""
-    from src.router.router import Router
-    from src.models.base import Task, SpawnResult
+    from agent_delegate.router.router import Router
+    from agent_delegate.models.base import Task, SpawnResult
     from unittest.mock import Mock
 
     path = _write(json.dumps({

@@ -8,7 +8,7 @@ import subprocess
 import os
 from collections import OrderedDict
 
-from src.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
+from agent_delegate.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
 
 _MAX_CACHED_RUNS = 100
 
