@@ -11,6 +11,8 @@ PipelineRunner - 按阶段执行流水线
 """
 
 import copy
+import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -18,6 +20,8 @@ from typing import Optional
 from agent_delegate.models.base import FallbackChain, Task, TaskType
 from agent_delegate.router.router import Router
 from agent_delegate.workers.pipelines import Pipeline, Stage, StageStatus
+
+logger = logging.getLogger(__name__)
 
 #: 阶段模型档位 → 任务类型，用 router.select_model() 取候选链，从而尊重 Router(chains=...)。
 TIER_TASK_TYPES: dict[str, TaskType] = {
@@ -36,7 +40,9 @@ class StageRecord:
     model: Optional[str] = None
     summary: str = ""
     error: Optional[str] = None
-    attempts: list[str] = field(default_factory=list)  # 各次派发的降级轨迹，按顺序拼接
+    attempts: list[str] = field(default_factory=list)  # 各次派发的降级轨迹（AttemptRecord），按顺序拼接
+    spawn_attempts: list = field(default_factory=list)  # 各轮派发的 SpawnResult（逐轮保留）
+    duration_ms: Optional[float] = None  # 阶段总耗时（含重试）
 
 
 @dataclass
@@ -87,16 +93,21 @@ class PipelineRunner:
     def _run_stage(
         self, stage: Stage, description: str, context: Optional[str], pipeline: Pipeline,
     ) -> StageRecord:
+        started = time.perf_counter()
         record = StageRecord(name=stage.name, status=StageStatus.IN_PROGRESS)
         stage.status = StageStatus.IN_PROGRESS
 
         missing = [p for p in stage.input_gates if not self._present(p)]
         if missing:
-            return self._fail(stage, record, f"缺少前置产物: {', '.join(missing)}")
+            failed = self._fail(stage, record, f"缺少前置产物: {', '.join(missing)}")
+            failed.duration_ms = (time.perf_counter() - started) * 1000
+            return failed
 
         chain = self._chain_for(stage.model_tier)
         if chain is None:
-            return self._fail(stage, record, f"未知模型档位: {stage.model_tier}")
+            failed = self._fail(stage, record, f"未知模型档位: {stage.model_tier}")
+            failed.duration_ms = (time.perf_counter() - started) * 1000
+            return failed
 
         error = None
         for _ in range(1 + stage.max_retries):
@@ -111,9 +122,14 @@ class PipelineRunner:
                 task, context=self._stage_context(context, pipeline), chain=chain,
             )
             record.attempts.extend(spawned.attempts)
+            record.spawn_attempts.append(spawned)
             if spawned.status == "error":
                 # 候选链已经耗尽，再重派只会重复同样的失败。
-                return self._fail(stage, record, spawned.error or "派发失败")
+                failed = self._fail(stage, record, spawned.error or "派发失败")
+                failed.duration_ms = (time.perf_counter() - started) * 1000
+                logger.error("Stage '%s' failed after %d tries: %s",
+                             stage.name, record.tries, failed.error)
+                return failed
 
             output = self.router.adapter.listen(
                 spawned.run_id, timeout_ms=stage.timeout_seconds * 1000,
@@ -122,6 +138,8 @@ class PipelineRunner:
             record.summary = output.summary
             if not output.success:
                 error = f"worker 报告失败: {output.summary}"
+                logger.info("Stage '%s' try %d reported failure: %s",
+                            stage.name, record.tries, output.summary)
                 continue
             stale = [
                 p for p in stage.output_artifacts
@@ -129,13 +147,22 @@ class PipelineRunner:
             ]
             if stale:
                 error = f"本次未产出: {', '.join(stale)}"
+                logger.info("Stage '%s' try %d produced nothing new: %s",
+                            stage.name, record.tries, ', '.join(stale))
                 continue
 
             stage.status = StageStatus.COMPLETED
             record.status = StageStatus.COMPLETED
+            record.duration_ms = (time.perf_counter() - started) * 1000
+            logger.debug("Stage '%s' completed in %d tries (%.1f ms)",
+                         stage.name, record.tries, record.duration_ms)
             return record
 
-        return self._fail(stage, record, error)
+        failed = self._fail(stage, record, error)
+        failed.duration_ms = (time.perf_counter() - started) * 1000
+        logger.error("Stage '%s' failed after %d tries: %s",
+                     stage.name, record.tries, error)
+        return failed
 
     # ─── helpers ────────────────────────────────────────────
 

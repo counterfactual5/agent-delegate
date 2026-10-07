@@ -4,13 +4,17 @@ Generic REST API RuntimeAdapter
 适用于任何提供 REST API 的 LLM runtime。
 """
 
+import http.client
 import json
+import logging
 import time
 import urllib.request
 import urllib.error
 from typing import Optional
 
 from agent_delegate.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
+
+logger = logging.getLogger(__name__)
 
 
 #: listen() 的默认轮询间隔（秒）。
@@ -61,7 +65,12 @@ class RESTAdapter(RuntimeAdapter):
             else config.get("poll_interval", DEFAULT_POLL_INTERVAL)
         )
 
-    def _request(self, method: str, path: str, data: dict = None) -> dict:
+    def _request(self, method: str, path: str, data: dict = None, timeout: int = 60) -> dict:
+        """发一次 HTTP 请求。
+
+        网络/协议类异常（URLError、超时、OS 层、JSON 解析、http.client
+        协议错误）统一编码成 {"error": ...}；编程错误（TypeError 等）向外抛。
+        """
         url = f"{self.base_url}{path}"
         body = json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, method=method, headers={
@@ -69,11 +78,12 @@ class RESTAdapter(RuntimeAdapter):
             **self.headers,
         })
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             return {"error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError, OSError,
+                json.JSONDecodeError, http.client.HTTPException) as e:
             return {"error": str(e) or type(e).__name__}
 
     def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
@@ -83,7 +93,7 @@ class RESTAdapter(RuntimeAdapter):
             "thinking": kwargs.get("thinking", "off"),
             "timeout_seconds": kwargs.get("timeout_seconds", 300),
             "cleanup": kwargs.get("cleanup", False),
-        })
+        }, timeout=kwargs.get("timeout_seconds", 300))
         error = _request_error(resp)
         if error is not None:
             return SpawnResult(run_id="", status="error", error=error)
@@ -165,11 +175,15 @@ class RESTAdapter(RuntimeAdapter):
         )
 
     def send(self, message: str, **kwargs) -> None:
-        self._request("POST", self.send_endpoint, {
+        """尽力通知：失败记 warning，不向调用方抛异常。"""
+        resp = self._request("POST", self.send_endpoint, {
             "message": message,
             "channel": kwargs.get("channel", "default"),
             "to": kwargs.get("to"),
         })
+        error = _request_error(resp)
+        if error is not None:
+            logger.warning("send() failed: %s", error)
 
     def list_runs(self, **kwargs) -> list:
         resp = self._request("GET", "/agents/runs")

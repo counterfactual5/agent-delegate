@@ -7,11 +7,15 @@ Router - 调度大脑
 3. 模型选择 → 用哪个模型 + fallback 链
 """
 
+import logging
 import re
+import time
 
 from agent_delegate.models.base import (
-    Task, TaskType, ContextDependency, FallbackChain, DEFAULT_CHAINS, SpawnResult, RuntimeAdapter, ErrorClass, classify_error,
+    Task, TaskType, ContextDependency, FallbackChain, DEFAULT_CHAINS, SpawnResult, RuntimeAdapter, ErrorClass, classify_error, AttemptRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Router:
@@ -171,9 +175,11 @@ class Router:
         - RATE_LIMIT(429)/AUTH：拉黑整个 provider，跳到下一家 provider 的候选；
         - SERVER_ERROR(5xx)：同模型重试一次，仍失败再降级；
         - TIMEOUT：立即降级到更快（speed_rank 更低）的候选；
+        - CONTEXT_LENGTH：降级到 context_window 更大的候选，无更大者即耗尽；
         - UNKNOWN：顺序降级到下一候选。
 
         provider 级隔离确保 Gemini 配额耗尽不会拖累 GPT，反之亦然。
+        每次尝试记为 AttemptRecord（含耗时），耗尽时 error 带聚合摘要。
 
         传入 chain 时跳过任务分类，直接使用该候选链（PipelineRunner 按阶段档位选链时使用）。
         """
@@ -187,7 +193,7 @@ class Router:
             task_desc=task.description,
         )
 
-        attempts: list[str] = []
+        attempts: list[AttemptRecord] = []
         dead_providers: set[str] = set()
         retried_server: set[str] = set()
 
@@ -196,37 +202,78 @@ class Router:
         while queue:
             candidate = queue.pop(0)
             if candidate.provider in dead_providers:
-                attempts.append(f"skip {candidate.model_id} (provider {candidate.provider} 已拉黑)")
+                attempts.append(AttemptRecord(
+                    model=candidate.model_id,
+                    provider=candidate.provider,
+                    outcome="skip",
+                    reason=f"provider {candidate.provider} blacklisted",
+                ))
                 continue
 
+            started = time.perf_counter()
             result = self.adapter.spawn(
                 task=packed,
                 model=candidate.model_id,
                 timeout_seconds=task.timeout_seconds,
             )
+            duration_ms = (time.perf_counter() - started) * 1000
 
             if result.status != "error":
                 result.model = candidate.model_id
-                attempts.append(f"ok {candidate.model_id}")
+                attempts.append(AttemptRecord(
+                    model=candidate.model_id,
+                    provider=candidate.provider,
+                    outcome="ok",
+                    status=result.status,
+                    duration_ms=duration_ms,
+                ))
                 result.attempts = attempts
                 return result
 
             err_class = classify_error(result)
-            attempts.append(f"fail {candidate.model_id} [{err_class.value}] {result.error or ''}".strip())
+            attempts.append(AttemptRecord(
+                model=candidate.model_id,
+                provider=candidate.provider,
+                outcome="fail",
+                status=result.status,
+                error_class=err_class.value,
+                error=result.error,
+                duration_ms=duration_ms,
+            ))
 
             if err_class in (ErrorClass.RATE_LIMIT, ErrorClass.AUTH):
                 # 整个 provider 不可用：拉黑，余下同 provider 候选会被跳过。
+                logger.warning("Blacklisting provider %s due to %s error",
+                               candidate.provider, err_class.value)
                 dead_providers.add(candidate.provider)
             elif err_class == ErrorClass.SERVER_ERROR and candidate.model_id not in retried_server:
                 # 瞬时 5xx：同模型重试一次（插回队首）。
+                logger.info("Retrying model %s after SERVER_ERROR", candidate.model_id)
                 retried_server.add(candidate.model_id)
                 queue.insert(0, candidate)
             elif err_class == ErrorClass.TIMEOUT:
                 # 超时：优先降级到更快的候选。
+                logger.debug("Re-sorting queue by speed_rank after TIMEOUT")
                 queue.sort(key=lambda c: c.speed_rank)
+            elif err_class == ErrorClass.CONTEXT_LENGTH:
+                # 上下文超限：只留窗口更大的候选，窗口大者先、同窗更快的先。
+                failed_window = candidate.context_window
+                queue = [c for c in queue if c.context_window > failed_window]
+                queue.sort(key=lambda c: (-c.context_window, c.speed_rank))
+                logger.debug("Filtered queue to context_window > %d, %d candidates remain",
+                             failed_window, len(queue))
             # UNKNOWN / 已重试过的 SERVER_ERROR：自然顺序降级。
 
+        # 聚合摘要；完整逐次轨迹在 attempts 里。
+        fail_classes: dict[str, int] = {}
+        for a in attempts:
+            if a.outcome == "fail" and a.error_class:
+                fail_classes[a.error_class] = fail_classes.get(a.error_class, 0) + 1
+        attempted = sum(1 for a in attempts if a.outcome != "skip")
+        error = (f"所有候选模型均失败 (attempted={attempted}, "
+                 f"blacklisted={sorted(dead_providers)}, error_classes={fail_classes})")
+        logger.warning("All candidates exhausted: %s", error)
         return SpawnResult(
             run_id="", status="error",
-            error="所有候选模型均失败", attempts=attempts,
+            error=error, attempts=attempts,
         )

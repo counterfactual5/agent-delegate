@@ -6,6 +6,7 @@ Agent Delegate - Production-grade multi-agent orchestration
 不直接依赖 OpenClaw / LangChain / OpenAI 等任何具体实现。
 """
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -42,6 +43,7 @@ class ModelCandidate:
     provider: str           # e.g. "gemini", "openai", "anthropic"
     speed_rank: int = 5     # 1=最快, 10=最慢
     cost_rank: int = 5      # 1=最便宜, 10=最贵
+    context_window: int = 128000  # tokens；CONTEXT_LENGTH 降级时用于过滤候选
 
 
 @dataclass
@@ -63,18 +65,38 @@ class ErrorClass(Enum):
     AUTH = "auth"               # 401/403 / 密钥失效 → 拉黑该 provider
     SERVER_ERROR = "server"     # 5xx → 同模型重试一次后降级
     TIMEOUT = "timeout"         # 超时 → 立即降级到更快的候选
+    CONTEXT_LENGTH = "context_length"  # 上下文超限 → 降级到更大窗口的候选
     UNKNOWN = "unknown"         # 其它 → 顺序降级
 
 
 # 关键字 → 错误分级映射（按优先级匹配 error 文本）。
+# 数字签名带数字边界（"1503" 不会触发 "500"）；裸 "too long" 已从 CONTEXT_LENGTH
+# 移除——它会误判延迟类措辞（"request took too long"，现归 TIMEOUT）；真实超长
+# 措辞用更精确的签名匹配。
 _ERROR_SIGNATURES: list[tuple[ErrorClass, tuple[str, ...]]] = [
     (ErrorClass.RATE_LIMIT, ("429", "rate limit", "ratelimit", "too many requests",
                              "quota", "配额", "限流")),
     (ErrorClass.AUTH, ("401", "403", "unauthorized", "forbidden", "invalid api key",
                        "api key", "认证", "鉴权", "密钥")),
-    (ErrorClass.TIMEOUT, ("timeout", "timed out", "deadline", "超时")),
+    (ErrorClass.CONTEXT_LENGTH, ("context length", "context_length", "token limit",
+                                 "maximum context", "上下文长度", "令牌数超限",
+                                 "exceeds context", "context window",
+                                 "prompt is too long", "input is too long",
+                                 "input too long", "too many tokens",
+                                 "payload too large", "request entity too large")),
+    (ErrorClass.TIMEOUT, ("timeout", "timed out", "deadline", "took too long", "超时")),
     (ErrorClass.SERVER_ERROR, ("500", "502", "503", "504", "internal server",
                                "bad gateway", "unavailable", "服务不可用")),
+]
+
+# 编译一次复用：数字签名加数字边界，短语签名按字面量匹配。
+_SIGNATURE_PATTERNS: list[tuple[ErrorClass, tuple[re.Pattern, ...]]] = [
+    (err_class, tuple(
+        re.compile(r"(?<!\d)" + re.escape(needle) + r"(?!\d)") if needle.isdigit()
+        else re.compile(re.escape(needle))
+        for needle in needles
+    ))
+    for err_class, needles in _ERROR_SIGNATURES
 ]
 
 
@@ -85,10 +107,34 @@ def classify_error(result: "SpawnResult") -> ErrorClass:
     text = (result.error or "").lower()
     if not text:
         return ErrorClass.UNKNOWN
-    for err_class, needles in _ERROR_SIGNATURES:
-        if any(n in text for n in needles):
+    for err_class, patterns in _SIGNATURE_PATTERNS:
+        if any(pattern.search(text) for pattern in patterns):
             return err_class
     return ErrorClass.UNKNOWN
+
+
+@dataclass
+class AttemptRecord:
+    """单个候选模型的调用/跳过审计记录（结构化降级轨迹）"""
+    model: str
+    provider: str
+    outcome: str  # ok | fail | skip
+    status: Optional[str] = None
+    error_class: Optional[str] = None
+    error: Optional[str] = None
+    reason: Optional[str] = None
+    duration_ms: Optional[float] = None
+
+    def __str__(self) -> str:
+        if self.outcome == "ok":
+            return f"ok {self.model}"
+        if self.outcome == "skip":
+            reason_str = f" ({self.reason})" if self.reason else ""
+            return f"skip {self.model}{reason_str}"
+        # outcome == "fail" 或其它
+        err_cls = f" [{self.error_class}]" if self.error_class else ""
+        err_msg = f" {self.error}" if self.error else ""
+        return f"{self.outcome} {self.model}{err_cls}{err_msg}".strip()
 
 
 @dataclass
@@ -98,7 +144,7 @@ class SpawnResult:
     status: str = "pending"  # pending | running | completed | error
     error: Optional[str] = None
     model: Optional[str] = None        # 实际命中的模型
-    attempts: list = field(default_factory=list)  # 降级审计轨迹
+    attempts: list = field(default_factory=list)  # 降级审计轨迹（list[AttemptRecord]）
 
 
 @dataclass

@@ -51,3 +51,21 @@ def test_timeout_is_spawn_error(monkeypatch):
 
 def test_listen_unknown_run_fails():
     assert not OpenClawAdapter().listen("nope").success
+
+
+# ─── 异常边界与 send 守卫（B2 嫁接） ───
+
+def test_spawn_programming_error_propagates(monkeypatch):
+    """编程错误（TypeError）不被 spawn 吞成失败结果。"""
+    import pytest
+    monkeypatch.setattr(subprocess, "run", _fake_run(raises=TypeError("boom")))
+    adapter = OpenClawAdapter()
+    with pytest.raises(TypeError):
+        adapter.spawn("task", "m")
+
+
+def test_send_timeout_does_not_raise(monkeypatch):
+    """send 是尽力通知：超时只记日志，不向调用方抛异常。"""
+    monkeypatch.setattr(subprocess, "run", _fake_run(
+        raises=subprocess.TimeoutExpired(cmd="openclaw", timeout=30)))
+    OpenClawAdapter().send("hello")  # 不应抛出

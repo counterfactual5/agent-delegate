@@ -9,12 +9,31 @@
   `OpenClawAdapter` now stores the CLI output in `spawn()` and returns it from `listen()`, instead of
   always reporting success; empty output no longer collapses every run to `run_id="unknown"`.
 - `Router.dispatch_with_fallback` accepts an optional `chain` to bypass task classification.
+- Error signatures match numeric codes with digit boundaries (`"1503"` no longer
+  triggers the `"500"` needle); `"took too long"` classifies as TIMEOUT. The
+  exhaustion error now carries an aggregate summary (`attempted`, `blacklisted`,
+  `error_classes`).
 
 ### Added
+- `AttemptRecord`: structured per-attempt audit trail (model, provider, outcome,
+  error class, duration) replacing hand-formatted attempt strings; `StageRecord`
+  keeps every round's `SpawnResult` in `spawn_attempts` and times each stage in
+  `duration_ms`.
+- `ErrorClass.CONTEXT_LENGTH`: context-overflow errors now fall back to candidates
+  with a larger `context_window` (`ModelCandidate.context_window`).
+- stdlib logging at key transitions: provider blacklisting, same-model 5xx retry,
+  timeout re-sorting, context filtering, stage retry/failure/completion, and
+  `send()` failures.
 - `PipelineRunner`: runs pipelines stage by stage with input/output artifact gates, reusing the router's
   fallback chain per stage tier and re-dispatching unqualified results up to `Stage.max_retries`.
 
 ### Fixed
+- `RESTAdapter._request` no longer swallows programming errors (they propagate to
+  the caller); network/protocol exceptions, including `http.client.HTTPException`,
+  still convert to `{"error": ...}`. The per-request timeout follows the task's
+  `timeout_seconds` instead of a hardcoded 60s.
+- `OpenClawAdapter.send()` and `RESTAdapter.send()` are best-effort: failures log
+  a warning instead of raising.
 - `RESTAdapter.listen()` returned transport errors and malformed responses only after the full timeout,
   reported as "Timeout waiting for agent". They now fail immediately with the original error. The poll
   interval is configurable and the last round no longer sleeps past the deadline.

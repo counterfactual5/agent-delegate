@@ -128,7 +128,7 @@ def test_reuses_router_fallback_chain(tmp_path):
     assert result.success
     assert adapter.calls[:2] == ["heavy-a", "heavy-b"]
     assert result.records[0].model == "heavy-b"
-    assert any("rate_limit" in a for a in result.records[0].attempts)
+    assert any(a.error_class == "rate_limit" for a in result.records[0].attempts)
 
 
 def test_exhausted_chain_does_not_retry_stage(tmp_path):
@@ -237,8 +237,8 @@ def test_record_reflects_last_try_and_accumulates_attempts(tmp_path):
     assert record.tries == 2
     assert record.model == "heavy-b"
     assert record.summary == "second"
-    assert record.attempts[0] == "ok heavy-a"
-    assert record.attempts[-1] == "ok heavy-b"
+    assert str(record.attempts[0]) == "ok heavy-a"
+    assert str(record.attempts[-1]) == "ok heavy-b"
     assert len(record.attempts) == 3
 
 
@@ -281,3 +281,18 @@ def test_partial_router_chains_no_keyerror(tmp_path):
     # heavy 用自定义链，light 回退到 STANDARD（不存在）→ 失败但不抛异常
     assert result.records[0].status == StageStatus.COMPLETED
     assert result.records[1].status == StageStatus.FAILED
+
+
+# ─── 逐轮 SpawnResult 与阶段耗时（B2 嫁接） ───
+
+def test_stage_record_tracks_spawn_attempts_and_duration(tmp_path):
+    runner, adapter = _runner(tmp_path, [
+        {"ok": False, "summary": "first"},          # try 1: listen 报失败
+        {"write": ["PLAN.md"], "summary": "second"},  # try 2: 成功
+    ])
+    record = runner.run(_two_stage(max_retries=1), "x").records[0]
+    assert record.status == StageStatus.COMPLETED
+    assert len(record.spawn_attempts) == record.tries == 2
+    # 每轮都是完整 SpawnResult（含降级轨迹 AttemptRecord）
+    assert record.spawn_attempts[0].attempts  # 非空审计轨迹
+    assert record.duration_ms is not None and record.duration_ms >= 0

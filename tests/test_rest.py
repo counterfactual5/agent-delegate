@@ -19,7 +19,7 @@ class ScriptedRESTAdapter(RESTAdapter):
         self.responses = list(responses)
         self.calls: list[str] = []
 
-    def _request(self, method: str, path: str, data: dict = None) -> dict:
+    def _request(self, method: str, path: str, data: dict = None, **kwargs) -> dict:
         self.calls.append(f"{method} {path}")
         return self.responses[min(len(self.calls) - 1, len(self.responses) - 1)]
 
@@ -266,3 +266,38 @@ def test_spawn_success_maps_run_id():
     assert result.status == "pending"
     assert result.run_id == "run-42"
     assert result.error is None
+
+# ─── _request 异常边界与超时透传（B2 嫁接） ───
+
+def test_http_client_exception_returns_error_payload():
+    """http.client.HTTPException（BadStatusLine）转为 error 字典，spawn 返回 error。"""
+    import http.client
+    from unittest.mock import patch
+    a = RESTAdapter(config={"base_url": "http://t"})
+    with patch("urllib.request.urlopen",
+               side_effect=http.client.BadStatusLine("garbage")):
+        resp = a._request("GET", "/x")
+        assert "error" in resp
+        result = a.spawn(task="t", model="m")
+    assert result.status == "error"
+
+
+def test_programming_error_propagates():
+    """编程错误（TypeError）不被 _request 吞掉。"""
+    from unittest.mock import patch
+    import pytest
+    a = RESTAdapter(config={"base_url": "http://t"})
+    with patch("urllib.request.urlopen", side_effect=TypeError("boom")):
+        with pytest.raises(TypeError):
+            a._request("GET", "/x")
+
+
+def test_spawn_timeout_passthrough():
+    """spawn 的 timeout_seconds 透传为单次 HTTP 请求的 timeout。"""
+    from unittest.mock import Mock, patch
+    a = RESTAdapter(config={"base_url": "http://t"})
+    with patch("urllib.request.urlopen") as m:
+        m.return_value.__enter__ = Mock(return_value=Mock(read=lambda: b'{"run_id":"r","status":"pending"}'))
+        m.return_value.__exit__ = Mock(return_value=False)
+        a.spawn(task="t", model="m", timeout_seconds=5)
+        assert m.call_args[1]["timeout"] == 5

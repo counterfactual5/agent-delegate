@@ -4,11 +4,14 @@ OpenClaw RuntimeAdapter 实现
 将 agent-delegate 的抽象接口映射到 OpenClaw 的 sessions_spawn / sessions_yield API。
 """
 
+import logging
 import os
 import subprocess
 import uuid
 
 from agent_delegate.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
+
+logger = logging.getLogger(__name__)
 
 
 class OpenClawAdapter(RuntimeAdapter):
@@ -53,7 +56,8 @@ class OpenClawAdapter(RuntimeAdapter):
             return SpawnResult(run_id=run_id, status="completed")
         except subprocess.TimeoutExpired:
             return SpawnResult(run_id="", status="error", error="Timeout")
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError, ValueError, OSError) as e:
+            # 运行时类异常转为失败结果；编程错误向外抛。
             return SpawnResult(run_id="", status="error", error=str(e))
 
     def listen(self, run_id: str, timeout_ms: int = 30000) -> WorkerOutput:
@@ -64,13 +68,16 @@ class OpenClawAdapter(RuntimeAdapter):
         return output
 
     def send(self, message: str, **kwargs) -> None:
-        """通过 openclaw message send 发送消息"""
+        """通过 openclaw message send 发送消息（尽力通知：失败记 warning，不抛异常）"""
         channel = kwargs.get("channel", "telegram")
         to = kwargs.get("to")
         cmd = [self._openclaw_bin, "message", "send", "--channel", channel, "-m", message]
         if to:
             cmd.extend(["-t", to])
-        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("send() failed for channel=%s: %s", channel, e)
 
     def list_runs(self, **kwargs) -> list:
         """列出活跃运行"""
