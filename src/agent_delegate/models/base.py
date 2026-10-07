@@ -53,7 +53,8 @@ class Task:
     task_type: Optional[TaskType] = None
     context_dependency: Optional[ContextDependency] = None
     dependency_type: Optional[DependencyType] = None
-    model_override: Optional[str] = None
+    model_override: Optional[str] = None      # 单个模型 ID，等价于 candidates=[model_override]
+    candidates: Optional[list[str]] = None    # 调用方给出的有序候选模型 ID（如 "provider/model"）
     timeout_seconds: int = 300
     cleanup_on_complete: bool = False
 
@@ -155,6 +156,7 @@ class WorkerOutput:
     output_path: Optional[str] = None
     artifacts: list = field(default_factory=list)
     issues: list = field(default_factory=list)
+    incomplete: bool = False  # 远端没给出终态（如 listen 超时）：run 可能仍在运行，不等于失败
 
 
 # ─── RuntimeAdapter 抽象接口 ──────────────────────────────
@@ -222,10 +224,25 @@ class RuntimeAdapter(ABC):
 
 # ─── Fallback Chain ──────────────────────────────────────
 
+class ChainNotConfigured(LookupError):
+    """任务没有可用的候选链：调用方既没给候选模型，Router 也没为该类型配置链。"""
+
+
 @dataclass
 class FallbackChain:
     """模型候选链：按优先级排列，失败自动降级"""
     candidates: list[ModelCandidate] = field(default_factory=list)
+
+    @classmethod
+    def from_ids(cls, model_ids: list[str]) -> "FallbackChain":
+        """
+        由有序模型 ID 构造候选链。provider 取 "provider/model" 的斜杠前缀；
+        没有前缀时以模型 ID 自身作 provider，避免一次限流把无关模型一起拉黑。
+        """
+        return cls(candidates=[
+            ModelCandidate(model_id=m, provider=m.split("/", 1)[0] if "/" in m else m)
+            for m in model_ids
+        ])
     
     def next(self, failed_model: Optional[str] = None) -> Optional[ModelCandidate]:
         """返回下一个候选模型。如果 failed_model 不为空，跳过它。"""
@@ -242,31 +259,6 @@ class FallbackChain:
         return self.candidates[0] if self.candidates else None
 
 
-# 预定义的 6 档候选链
-DEFAULT_CHAINS: dict[TaskType, FallbackChain] = {
-    TaskType.TRIVIAL: FallbackChain(candidates=[
-        ModelCandidate("gemini-flash", "gemini", speed_rank=1, cost_rank=1),
-        ModelCandidate("gpt-flash", "openai", speed_rank=2, cost_rank=2),
-    ]),
-    TaskType.STANDARD: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro", "gemini", speed_rank=3, cost_rank=3),
-        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4),
-    ]),
-    TaskType.CODING: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6),
-        ModelCandidate("gpt-codex", "openai", speed_rank=5, cost_rank=5),
-        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=3),
-    ]),
-    TaskType.RESEARCH: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6),
-        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4),
-    ]),
-    TaskType.LIGHT_CODING: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-low", "gemini", speed_rank=4, cost_rank=3),
-        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=2),
-    ]),
-    TaskType.AUDIT: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6),
-        ModelCandidate("gpt-codex-max", "openai", speed_rank=7, cost_rank=7),
-    ]),
-}
+# 不内置模型清单：可用模型因运行环境而异，写死的名字换个环境就不存在。
+# 由调用方传 Task.candidates / Task.model_override，或用 Router(chains=...) 按任务类型配置。
+DEFAULT_CHAINS: dict[TaskType, FallbackChain] = {}

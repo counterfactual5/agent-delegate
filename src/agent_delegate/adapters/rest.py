@@ -123,7 +123,8 @@ class RESTAdapter(RuntimeAdapter):
             if remaining <= 0:
                 break
             time.sleep(min(self.poll_interval, remaining))
-        return WorkerOutput(success=False, summary="Timeout waiting for agent")
+        # 远端只是还没给终态：标为未完成而不是失败，调用方不应据此重派。
+        return WorkerOutput(success=False, summary="Timeout waiting for agent", incomplete=True)
 
     def _interpret_response(self, resp, run_id: str) -> Optional[WorkerOutput]:
         """

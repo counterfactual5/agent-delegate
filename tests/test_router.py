@@ -2,7 +2,7 @@
 
 from agent_delegate.router.router import Router
 from agent_delegate.models.base import (
-    Task, TaskType, ContextDependency,
+    Task, TaskType, ContextDependency, FallbackChain,
     SpawnResult, RuntimeAdapter,
 )
 
@@ -55,7 +55,7 @@ def test_dispatch_strong_context():
 
 def test_dispatch_weak_context():
     """弱上下文依赖应该外包"""
-    router = Router(MockAdapter())
+    router = Router(MockAdapter(), chains={TaskType.TRIVIAL: FallbackChain.from_ids(["p/m"])})
     result = router.dispatch("写一个爬虫")
     assert isinstance(result, SpawnResult)
     assert result.run_id == "test-123"

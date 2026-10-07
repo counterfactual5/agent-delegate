@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from agent_delegate.models.base import FallbackChain, Task, TaskType
+from agent_delegate.models.base import ChainNotConfigured, FallbackChain, Task, TaskType
 from agent_delegate.router.router import Router
 from agent_delegate.workers.pipelines import Pipeline, Stage, StageStatus
 
@@ -42,6 +42,8 @@ class StageRecord:
     error: Optional[str] = None
     attempts: list[str] = field(default_factory=list)  # 各次派发的降级轨迹（AttemptRecord），按顺序拼接
     spawn_attempts: list = field(default_factory=list)  # 各轮派发的 SpawnResult（逐轮保留）
+    run_id: Optional[str] = None  # 最后一次派发的 run；incomplete 时由调用方凭它继续 listen
+    incomplete: bool = False  # listen 没等到终态：未重派，远端可能仍在运行
     duration_ms: Optional[float] = None  # 阶段总耗时（含重试）
 
 
@@ -58,6 +60,10 @@ class PipelineResult:
     @property
     def failed_stage(self) -> Optional[StageRecord]:
         return next((r for r in self.records if r.status == StageStatus.FAILED), None)
+
+    @property
+    def incomplete_stage(self) -> Optional[StageRecord]:
+        return next((r for r in self.records if r.incomplete), None)
 
 
 class PipelineRunner:
@@ -88,7 +94,12 @@ class PipelineRunner:
         if self.tier_chains is not None:
             return self.tier_chains.get(tier)
         task_type = TIER_TASK_TYPES.get(tier)
-        return self.router.select_model(task_type) if task_type else None
+        if task_type is None:
+            return None
+        try:
+            return self.router.select_model(task_type)
+        except ChainNotConfigured:
+            return None
 
     def _run_stage(
         self, stage: Stage, description: str, context: Optional[str], pipeline: Pipeline,
@@ -105,7 +116,7 @@ class PipelineRunner:
 
         chain = self._chain_for(stage.model_tier)
         if chain is None:
-            failed = self._fail(stage, record, f"未知模型档位: {stage.model_tier}")
+            failed = self._fail(stage, record, f"模型档位 {stage.model_tier} 没有配置候选链")
             failed.duration_ms = (time.perf_counter() - started) * 1000
             return failed
 
@@ -136,6 +147,14 @@ class PipelineRunner:
             )
             record.model = spawned.model
             record.summary = output.summary
+            record.run_id = spawned.run_id
+            if output.incomplete:
+                # 远端可能仍在运行：重派会让同一任务跑两遍，把 run_id 交还调用方。
+                record.incomplete = True
+                record.error = f"run {spawned.run_id} 未在 {stage.timeout_seconds}s 内结束，未重派: {output.summary}"
+                record.duration_ms = (time.perf_counter() - started) * 1000
+                logger.warning("Stage '%s' incomplete: %s", stage.name, record.error)
+                return record
             if not output.success:
                 error = f"worker 报告失败: {output.summary}"
                 logger.info("Stage '%s' try %d reported failure: %s",

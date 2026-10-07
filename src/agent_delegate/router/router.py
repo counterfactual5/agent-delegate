@@ -5,6 +5,8 @@ Router - 调度大脑
 1. 上下文依赖分析 → 自己做还是外包
 2. 任务分类 → 路由到哪个 Worker
 3. 模型选择 → 用哪个模型 + fallback 链
+
+调用方优先：调用方给了候选模型或任务类型时直接采用，关键词分类只是兜底。
 """
 
 import logging
@@ -12,7 +14,7 @@ import re
 import time
 
 from agent_delegate.models.base import (
-    Task, TaskType, ContextDependency, FallbackChain, DEFAULT_CHAINS, SpawnResult, RuntimeAdapter, ErrorClass, classify_error, AttemptRecord,
+    Task, TaskType, ContextDependency, FallbackChain, DEFAULT_CHAINS, ChainNotConfigured, SpawnResult, RuntimeAdapter, ErrorClass, classify_error, AttemptRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ class Router:
 
     def __init__(self, adapter: RuntimeAdapter, chains: dict = None):
         self.adapter = adapter
-        self.chains = chains if chains is not None else DEFAULT_CHAINS
+        self.chains = chains if chains is not None else dict(DEFAULT_CHAINS)
 
     # ─── 决策 1: 上下文依赖分析 ──────────────────────
 
@@ -99,10 +101,30 @@ class Router:
     # ─── 决策 3: 模型选择 + fallback ─────────────────
 
     def select_model(self, task_type: TaskType) -> FallbackChain:
-        """返回该任务类型的候选链"""
-        if task_type in self.chains:
-            return self.chains[task_type]
-        return self.chains.get(TaskType.STANDARD)
+        """返回该任务类型的候选链；未配置时抛 ChainNotConfigured，不悄悄换用其它类型的链。"""
+        chain = self.chains.get(task_type)
+        if chain is None or not chain.candidates:
+            name = getattr(task_type, "value", task_type)
+            raise ChainNotConfigured(
+                f"no model chain configured for task type {name!r}; pass Task.candidates / "
+                f"Task.model_override, or configure Router(chains=...)"
+            )
+        return chain
+
+    def resolve_chain(self, task: Task) -> FallbackChain:
+        """
+        按调用方优先的顺序确定候选链：
+        task.candidates > task.model_override > 调用方设置的 task.task_type > classify_task 关键词分类。
+
+        候选模型应来自当前运行环境实际可用的模型列表，不要凭记忆填写。
+        """
+        if task.candidates:
+            return FallbackChain.from_ids(task.candidates)
+        if task.model_override:
+            return FallbackChain.from_ids([task.model_override])
+        if task.task_type is None:
+            task.task_type = self.classify_task(task)
+        return self.select_model(task.task_type)
 
     # ─── 上下文打包 ─────────────────────────────────
 
@@ -125,7 +147,9 @@ class Router:
 
     def dispatch(self, description: str, context: str = None) -> SpawnResult | str:
         """
-        主调度入口。
+        主调度入口：基于关键词的粗略路由，保留作兼容，不推荐。任务类型靠关键词猜，
+        只用候选链首选、不降级；调用方能判断任务时改用 dispatch_with_fallback，
+        并给出 Task.candidates 或 task_type。
         
         Returns:
             SpawnResult: 如果外包给子 Agent
@@ -181,12 +205,12 @@ class Router:
         provider 级隔离确保 Gemini 配额耗尽不会拖累 GPT，反之亦然。
         每次尝试记为 AttemptRecord（含耗时），耗尽时 error 带聚合摘要。
 
-        传入 chain 时跳过任务分类，直接使用该候选链（PipelineRunner 按阶段档位选链时使用）。
+        传入 chain 时直接使用该候选链（PipelineRunner 按阶段档位选链时使用）；
+        否则按 resolve_chain 的顺序确定。没有可用候选链时抛 ChainNotConfigured。
         """
         task.context_dependency = self.analyze_context(task)
         if chain is None:
-            task.task_type = self.classify_task(task)
-            chain = self.select_model(task.task_type)
+            chain = self.resolve_chain(task)
 
         packed = self.pack_context(
             context=context or "（无额外上下文）",

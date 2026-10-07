@@ -264,7 +264,7 @@ def test_worker_creating_empty_dir_fails(tmp_path):
             self._outputs[run_id] = WorkerOutput(success=True, summary="done")
             return SpawnResult(run_id=run_id, status="completed")
 
-    runner = PipelineRunner(Router(EmptyDirAdapter(tmp_path, [])), tmp_path)
+    runner = PipelineRunner(Router(EmptyDirAdapter(tmp_path, [])), tmp_path, tier_chains=TIERS)
     result = runner.run(_single("out/"), "x")
     assert not result.success
     assert "out/" in result.failed_stage.error
@@ -296,3 +296,25 @@ def test_stage_record_tracks_spawn_attempts_and_duration(tmp_path):
     # 每轮都是完整 SpawnResult（含降级轨迹 AttemptRecord）
     assert record.spawn_attempts[0].attempts  # 非空审计轨迹
     assert record.duration_ms is not None and record.duration_ms >= 0
+
+
+# ─── listen 未等到终态 ───
+
+def test_incomplete_listen_is_not_redispatched(tmp_path):
+    """listen 超时（远端可能仍在跑）：不重派，把 run_id 交还调用方。"""
+    class StillRunningAdapter(FileWritingAdapter):
+        def listen(self, run_id, timeout_ms=30000):
+            return WorkerOutput(success=False, summary="Timeout waiting for agent", incomplete=True)
+
+    adapter = StillRunningAdapter(tmp_path, [])
+    result = PipelineRunner(Router(adapter), tmp_path, tier_chains=TIERS).run(
+        _two_stage(max_retries=2), "x")
+    record = result.records[0]
+    assert adapter.calls == ["heavy-a"]
+    assert record.incomplete is True
+    assert record.run_id == "run-1"
+    assert record.tries == 1
+    assert result.incomplete_stage is record
+    assert result.failed_stage is None
+    assert not result.success
+    assert len(result.records) == 1  # 后续阶段不开始

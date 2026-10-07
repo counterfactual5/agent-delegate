@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Changed
+- Model selection is caller-first: `dispatch_with_fallback` uses `Task.candidates`, then
+  `Task.model_override`, then a caller-set `Task.task_type` (no longer overwritten by keyword
+  classification); keyword classification is only the fallback. **Breaking:** `DEFAULT_CHAINS` is now
+  empty (its placeholder IDs were not real models), and `Router.select_model()` raises
+  `ChainNotConfigured` instead of silently falling back to the STANDARD chain. `Router.dispatch()` is
+  kept but documented as not recommended.
 - Moved to a src layout: the package is now `agent_delegate` (`src/agent_delegate/`); tests import the
   package via `pythonpath = ["src"]` instead of `sys.path` hacks.
 - Unified the adapter contract: callers always call `listen()` after a successful `spawn()`.
@@ -15,6 +21,11 @@
   `error_classes`).
 
 ### Added
+- `Task.candidates` (ordered `provider/model` IDs) and `FallbackChain.from_ids()`; the provider is the
+  ID prefix, or the ID itself when there is no prefix.
+- `WorkerOutput.incomplete`: `RESTAdapter.listen()` timeouts are reported as incomplete rather than as
+  plain failures. `PipelineRunner` does not re-dispatch an incomplete stage; it records the `run_id`
+  (`StageRecord.incomplete`, `PipelineResult.incomplete_stage`) so the caller can listen again.
 - `AttemptRecord`: structured per-attempt audit trail (model, provider, outcome,
   error class, duration) replacing hand-formatted attempt strings; `StageRecord`
   keeps every round's `SpawnResult` in `spawn_attempts` and times each stage in

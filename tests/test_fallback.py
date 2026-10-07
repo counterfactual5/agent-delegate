@@ -1,8 +1,10 @@
 """测试按错误类型降级的 dispatch_with_fallback。"""
 
+import pytest
+
 from agent_delegate.router.router import Router
 from agent_delegate.models.base import (
-    Task, SpawnResult, WorkerOutput, RuntimeAdapter,
+    Task, TaskType, ChainNotConfigured, SpawnResult, WorkerOutput, RuntimeAdapter,
     ErrorClass, classify_error, FallbackChain, ModelCandidate, AttemptRecord,
 )
 
@@ -46,6 +48,13 @@ def test_classify():
 
 
 # CODING 链: gemini-pro-high(gemini), gpt-codex(openai), gpt-codex-mini(openai)
+CODING_CHAINS = {TaskType.CODING: FallbackChain(candidates=[
+    ModelCandidate("gemini-pro-high", "gemini", speed_rank=6),
+    ModelCandidate("gpt-codex", "openai", speed_rank=5),
+    ModelCandidate("gpt-codex-mini", "openai", speed_rank=3),
+])}
+
+
 def _coding_task():
     return Task(description="写一个完整的电商后端")
 
@@ -55,7 +64,7 @@ def test_rate_limit_skips_whole_provider():
     adapter = ScriptedAdapter({
         "gemini-pro-high": _err("429 rate limit"),
     })
-    router = Router(adapter)
+    router = Router(adapter, chains=CODING_CHAINS)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
     assert result.model == "gpt-codex"
@@ -74,7 +83,7 @@ def test_server_error_retries_same_model_once():
         return SpawnResult(run_id="ok", status="completed")
 
     adapter.spawn = spawn  # type: ignore
-    router = Router(adapter)
+    router = Router(adapter, chains=CODING_CHAINS)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
     assert result.model == "gemini-pro-high"
@@ -86,7 +95,7 @@ def test_timeout_prefers_faster_candidate():
     adapter = ScriptedAdapter({
         "gemini-pro-high": _err("request timed out"),
     })
-    router = Router(adapter)
+    router = Router(adapter, chains=CODING_CHAINS)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
     # gpt-codex(rank5) vs gpt-codex-mini(rank3) → mini 先跑
@@ -100,7 +109,7 @@ def test_all_fail_returns_error_with_audit():
         "gpt-codex": _err("500"),
         "gpt-codex-mini": _err("500"),
     })
-    router = Router(adapter)
+    router = Router(adapter, chains=CODING_CHAINS)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "error"
     assert "所有候选模型均失败" in result.error
@@ -108,7 +117,7 @@ def test_all_fail_returns_error_with_audit():
 
 
 def test_success_records_attempts():
-    router = Router(ScriptedAdapter({}))
+    router = Router(ScriptedAdapter({}), chains=CODING_CHAINS)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
     assert result.attempts[-1].outcome == "ok"
@@ -200,3 +209,61 @@ def test_context_length_exhausts_when_no_larger_window():
     assert "context_length" in result.error
     # a 记 fail 后，b 从未被 spawn（窗口过滤直接清空队列）
     assert adapter.calls == ["a"]
+
+
+# ─── 调用方优先选模型 ───
+
+def test_caller_task_type_is_not_reclassified():
+    """调用方说是 RESEARCH，描述里的 "api" 不能把它改成 CODING。"""
+    adapter = ScriptedAdapter({})
+    router = Router(adapter, chains={
+        TaskType.RESEARCH: FallbackChain.from_ids(["r/research-model"]),
+        TaskType.CODING: FallbackChain.from_ids(["c/coding-model"]),
+    })
+    task = Task(description="调研一下这个库的 API 设计", task_type=TaskType.RESEARCH)
+    result = router.dispatch_with_fallback(task)
+    assert result.model == "r/research-model"
+    assert task.task_type == TaskType.RESEARCH
+
+
+def test_candidates_are_tried_in_order_with_provider_blacklist():
+    adapter = ScriptedAdapter({"a/x": _err("429 rate limit")})
+    router = Router(adapter)
+    result = router.dispatch_with_fallback(
+        Task(description="q", candidates=["a/x", "a/y", "b/z"]))
+    assert result.model == "b/z"
+    assert adapter.calls == ["a/x", "b/z"]
+    assert [a.outcome for a in result.attempts] == ["fail", "skip", "ok"]
+
+
+def test_candidates_take_precedence_over_task_type_and_override():
+    adapter = ScriptedAdapter({})
+    router = Router(adapter, chains={TaskType.CODING: FallbackChain.from_ids(["c/coding-model"])})
+    result = router.dispatch_with_fallback(Task(
+        description="q", task_type=TaskType.CODING, model_override="o/override",
+        candidates=["p/picked"]))
+    assert adapter.calls == ["p/picked"]
+
+
+def test_model_override_needs_no_configured_chain():
+    adapter = ScriptedAdapter({})
+    result = Router(adapter).dispatch_with_fallback(
+        Task(description="写一个完整的电商后端", model_override="b/z"))
+    assert result.status == "completed"
+    assert adapter.calls == ["b/z"]
+
+
+def test_ids_without_provider_prefix_are_not_blacklisted_together():
+    adapter = ScriptedAdapter({"x": _err("429")})
+    result = Router(adapter).dispatch_with_fallback(Task(description="q", candidates=["x", "y"]))
+    assert result.model == "y"
+    assert adapter.calls == ["x", "y"]
+
+
+def test_unconfigured_chain_raises_instead_of_falling_back():
+    """没有候选、没有配置：报错并说明缺哪个类型，不悄悄换用 STANDARD 链。"""
+    adapter = ScriptedAdapter({})
+    router = Router(adapter, chains={TaskType.STANDARD: FallbackChain.from_ids(["s/std"])})
+    with pytest.raises(ChainNotConfigured, match="coding"):
+        router.dispatch_with_fallback(_coding_task())
+    assert adapter.calls == []

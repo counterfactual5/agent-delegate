@@ -147,6 +147,7 @@ def test_listen_timeout_returns_failure():
     elapsed = time.monotonic() - started
 
     assert out.success is False
+    assert out.incomplete is True
     assert out.summary == "Timeout waiting for agent"
     assert len(adapter.calls) >= 2  # 确实轮询过，不是第一次就放弃
     assert elapsed < 1.0
@@ -301,3 +302,10 @@ def test_spawn_timeout_passthrough():
         m.return_value.__exit__ = Mock(return_value=False)
         a.spawn(task="t", model="m", timeout_seconds=5)
         assert m.call_args[1]["timeout"] == 5
+
+
+def test_listen_terminal_states_are_not_incomplete():
+    done = _adapter([{"status": "completed", "summary": "ok"}]).listen("run-1", timeout_ms=60)
+    failed = _adapter([{"status": "error", "error": "boom"}]).listen("run-1", timeout_ms=60)
+    assert done.incomplete is False
+    assert failed.incomplete is False and failed.success is False
