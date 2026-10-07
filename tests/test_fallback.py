@@ -115,3 +115,27 @@ def test_success_records_attempts():
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
     assert result.attempts[-1].startswith("ok ")
+    # 验证 AttemptRecord 类型与字段
+    attempt = result.attempts[-1]
+    assert attempt.outcome == "ok"
+    assert attempt.model == "gemini-pro-high"
+    assert attempt.provider == "gemini"
+
+
+def test_failure_and_skip_records_attempts():
+    adapter = ScriptedAdapter({
+        "gemini-pro-high": _err("429"),
+        "gpt-codex": _err("500"),
+        "gpt-codex-mini": _err("500"),
+    })
+    router = Router(adapter)
+    result = router.dispatch_with_fallback(_coding_task())
+    assert result.status == "error"
+    assert len(result.attempts) >= 3
+    first_attempt = result.attempts[0]
+    assert first_attempt.outcome == "fail"
+    assert first_attempt.model == "gemini-pro-high"
+    assert first_attempt.provider == "gemini"
+    assert first_attempt.error_class == "rate_limit"
+    assert "429" in (first_attempt.error or "")
+    assert str(first_attempt).startswith("fail gemini-pro-high [rate_limit]")

@@ -25,6 +25,7 @@ class TaskType(Enum):
 
 
 class ContextDependency(Enum):
+    NONE = "none"        # 无依赖
     STRONG = "strong"    # 强依赖主会话上下文 → 主 Agent 处理
     WEAK = "weak"        # 弱/无依赖 → 可外包给子 Agent
 
@@ -42,6 +43,7 @@ class ModelCandidate:
     provider: str           # e.g. "gemini", "openai", "anthropic"
     speed_rank: int = 5     # 1=最快, 10=最慢
     cost_rank: int = 5      # 1=最便宜, 10=最贵
+    context_window: int = 128000  # 上下文窗口大小（tokens），默认 128k
 
 
 @dataclass
@@ -63,6 +65,7 @@ class ErrorClass(Enum):
     AUTH = "auth"               # 401/403 / 密钥失效 → 拉黑该 provider
     SERVER_ERROR = "server"     # 5xx → 同模型重试一次后降级
     TIMEOUT = "timeout"         # 超时 → 立即降级到更快的候选
+    CONTEXT_LENGTH = "context_length"  # 上下文长度超限 → 降级到更大上下文窗口的模型
     UNKNOWN = "unknown"         # 其它 → 顺序降级
 
 
@@ -72,6 +75,9 @@ _ERROR_SIGNATURES: list[tuple[ErrorClass, tuple[str, ...]]] = [
                              "quota", "配额", "限流")),
     (ErrorClass.AUTH, ("401", "403", "unauthorized", "forbidden", "invalid api key",
                        "api key", "认证", "鉴权", "密钥")),
+    (ErrorClass.CONTEXT_LENGTH, ("context length", "context_length", "token limit", 
+                                 "maximum context", "too long", "上下文长度", 
+                                 "令牌数超限", "exceeds", "context window")),
     (ErrorClass.TIMEOUT, ("timeout", "timed out", "deadline", "超时")),
     (ErrorClass.SERVER_ERROR, ("500", "502", "503", "504", "internal server",
                                "bad gateway", "unavailable", "服务不可用")),
@@ -92,13 +98,44 @@ def classify_error(result: "SpawnResult") -> ErrorClass:
 
 
 @dataclass
+class AttemptRecord:
+    """单个候选模型的调用/跳过审计记录"""
+    model: str
+    provider: str
+    outcome: str  # ok | fail | skip
+    error_class: Optional[str] = None
+    error: Optional[str] = None
+    reason: Optional[str] = None
+
+    def __str__(self) -> str:
+        if self.outcome == "ok":
+            return f"ok {self.model}"
+        if self.outcome == "skip":
+            reason_str = f" ({self.reason})" if self.reason else ""
+            return f"skip {self.model}{reason_str}"
+        # outcome == "fail" or others
+        err_cls = f" [{self.error_class}]" if self.error_class else ""
+        err_msg = f" {self.error}" if self.error else ""
+        return f"{self.outcome} {self.model}{err_cls}{err_msg}".strip()
+
+    def startswith(self, prefix: str) -> bool:
+        return str(self).startswith(prefix)
+
+    def __contains__(self, item: str) -> bool:
+        return item in str(self)
+
+    def lower(self) -> str:
+        return str(self).lower()
+
+
+@dataclass
 class SpawnResult:
     """spawn 返回值"""
     run_id: str
     status: str = "pending"  # pending | running | completed | error
     error: Optional[str] = None
     model: Optional[str] = None        # 实际命中的模型
-    attempts: list = field(default_factory=list)  # 降级审计轨迹
+    attempts: list[AttemptRecord] = field(default_factory=list)  # 降级审计轨迹
 
 
 @dataclass
@@ -195,28 +232,28 @@ class FallbackChain:
 # 预定义的 6 档候选链
 DEFAULT_CHAINS: dict[TaskType, FallbackChain] = {
     TaskType.TRIVIAL: FallbackChain(candidates=[
-        ModelCandidate("gemini-flash", "gemini", speed_rank=1, cost_rank=1),
-        ModelCandidate("gpt-flash", "openai", speed_rank=2, cost_rank=2),
+        ModelCandidate("gemini-flash", "gemini", speed_rank=1, cost_rank=1, context_window=32000),
+        ModelCandidate("gpt-flash", "openai", speed_rank=2, cost_rank=2, context_window=16000),
     ]),
     TaskType.STANDARD: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro", "gemini", speed_rank=3, cost_rank=3),
-        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4),
+        ModelCandidate("gemini-pro", "gemini", speed_rank=3, cost_rank=3, context_window=128000),
+        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4, context_window=128000),
     ]),
     TaskType.CODING: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6),
-        ModelCandidate("gpt-codex", "openai", speed_rank=5, cost_rank=5),
-        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=3),
+        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6, context_window=128000),
+        ModelCandidate("gpt-codex", "openai", speed_rank=5, cost_rank=5, context_window=128000),
+        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=3, context_window=64000),
     ]),
     TaskType.RESEARCH: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6),
-        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4),
+        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6, context_window=1000000),
+        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4, context_window=128000),
     ]),
     TaskType.LIGHT_CODING: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-low", "gemini", speed_rank=4, cost_rank=3),
-        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=2),
+        ModelCandidate("gemini-pro-low", "gemini", speed_rank=4, cost_rank=3, context_window=128000),
+        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=2, context_window=64000),
     ]),
     TaskType.AUDIT: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6),
-        ModelCandidate("gpt-codex-max", "openai", speed_rank=7, cost_rank=7),
+        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6, context_window=128000),
+        ModelCandidate("gpt-codex-max", "openai", speed_rank=7, cost_rank=7, context_window=200000),
     ]),
 }

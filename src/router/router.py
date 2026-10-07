@@ -10,7 +10,7 @@ Router - 调度大脑
 import re
 
 from src.models.base import (
-    Task, TaskType, ContextDependency, FallbackChain, DEFAULT_CHAINS, SpawnResult, RuntimeAdapter, ErrorClass, classify_error,
+    Task, TaskType, ContextDependency, FallbackChain, ModelCandidate, DEFAULT_CHAINS, SpawnResult, RuntimeAdapter, ErrorClass, classify_error, AttemptRecord,
 )
 
 
@@ -96,7 +96,14 @@ class Router:
 
     def select_model(self, task_type: TaskType) -> FallbackChain:
         """返回该任务类型的候选链"""
-        return self.chains.get(task_type, self.chains[TaskType.STANDARD])
+        if task_type in self.chains:
+            return self.chains[task_type]
+        if TaskType.STANDARD in self.chains:
+            return self.chains[TaskType.STANDARD]
+        values = list(self.chains.values())
+        if not values:
+            return FallbackChain(candidates=[])
+        return values[0]
 
     # ─── 上下文打包 ─────────────────────────────────
 
@@ -171,16 +178,30 @@ class Router:
 
         provider 级隔离确保 Gemini 配额耗尽不会拖累 GPT，反之亦然。
         """
-        task.context_dependency = self.analyze_context(task)
-        task.task_type = self.classify_task(task)
-        chain = self.select_model(task.task_type)
+        # Only analyze if not already set by caller
+        if not task.context_dependency:
+            task.context_dependency = self.analyze_context(task)
+        if not task.task_type:
+            task.task_type = self.classify_task(task)
+
+        # Respect model_override if provided
+        if task.model_override:
+            chain = FallbackChain(candidates=[
+                ModelCandidate(
+                    model_id=task.model_override,
+                    provider=task.model_override.split('/')[0] if '/' in task.model_override else "custom",
+                    speed_rank=1,
+                )
+            ])
+        else:
+            chain = self.select_model(task.task_type)
 
         packed = self.pack_context(
             context=context or "（无额外上下文）",
             task_desc=task.description,
         )
 
-        attempts: list[str] = []
+        attempts: list[AttemptRecord] = []
         dead_providers: set[str] = set()
         retried_server: set[str] = set()
 
@@ -189,7 +210,12 @@ class Router:
         while queue:
             candidate = queue.pop(0)
             if candidate.provider in dead_providers:
-                attempts.append(f"skip {candidate.model_id} (provider {candidate.provider} 已拉黑)")
+                attempts.append(AttemptRecord(
+                    model=candidate.model_id,
+                    provider=candidate.provider,
+                    outcome="skip",
+                    reason=f"provider {candidate.provider} 已拉黑",
+                ))
                 continue
 
             result = self.adapter.spawn(
@@ -198,14 +224,24 @@ class Router:
                 timeout_seconds=task.timeout_seconds,
             )
 
-            if result.status != "error":
+            if result.status == "completed":
                 result.model = candidate.model_id
-                attempts.append(f"ok {candidate.model_id}")
+                attempts.append(AttemptRecord(
+                    model=candidate.model_id,
+                    provider=candidate.provider,
+                    outcome="ok",
+                ))
                 result.attempts = attempts
                 return result
 
             err_class = classify_error(result)
-            attempts.append(f"fail {candidate.model_id} [{err_class.value}] {result.error or ''}".strip())
+            attempts.append(AttemptRecord(
+                model=candidate.model_id,
+                provider=candidate.provider,
+                outcome="fail",
+                error_class=err_class.value,
+                error=result.error or None,
+            ))
 
             if err_class in (ErrorClass.RATE_LIMIT, ErrorClass.AUTH):
                 # 整个 provider 不可用：拉黑，余下同 provider 候选会被跳过。
@@ -217,6 +253,12 @@ class Router:
             elif err_class == ErrorClass.TIMEOUT:
                 # 超时：优先降级到更快的候选。
                 queue.sort(key=lambda c: c.speed_rank)
+            elif err_class == ErrorClass.CONTEXT_LENGTH:
+                # 上下文长度超限：过滤掉窗口小于等于当前失败模型的候选，
+                # 然后按窗口大小降序排列，优先尝试最大窗口的模型。
+                failed_window = candidate.context_window
+                queue = [c for c in queue if c.context_window > failed_window]
+                queue.sort(key=lambda c: (-c.context_window, c.speed_rank))
             # UNKNOWN / 已重试过的 SERVER_ERROR：自然顺序降级。
 
         return SpawnResult(

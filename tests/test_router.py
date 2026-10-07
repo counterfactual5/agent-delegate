@@ -6,7 +6,7 @@ sys.path.insert(0, ".")
 from src.router.router import Router
 from src.models.base import (
     Task, TaskType, ContextDependency,
-    SpawnResult, RuntimeAdapter,
+    SpawnResult, RuntimeAdapter, FallbackChain, ModelCandidate,
 )
 
 

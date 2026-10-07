@@ -25,12 +25,17 @@ class RESTAdapter(RuntimeAdapter):
     }
     """
 
-    def __init__(self, config: dict):
-        self.base_url = config["base_url"].rstrip("/")
-        self.headers = config.get("headers", {})
-        self.spawn_endpoint = config.get("spawn_endpoint", "/agents/spawn")
-        self.listen_endpoint = config.get("listen_endpoint", "/agents/{run_id}/status")
-        self.send_endpoint = config.get("send_endpoint", "/messages/send")
+    def __init__(self, config: dict = None, **kwargs):
+        cfg = dict(config or {})
+        cfg.update(kwargs)
+        base_url = cfg.get("base_url")
+        if not base_url:
+            raise ValueError("base_url is required for RESTAdapter")
+        self.base_url = base_url.rstrip("/")
+        self.headers = cfg.get("headers", {})
+        self.spawn_endpoint = cfg.get("spawn_endpoint", "/agents/spawn")
+        self.listen_endpoint = cfg.get("listen_endpoint", "/agents/{run_id}/status")
+        self.send_endpoint = cfg.get("send_endpoint", "/messages/send")
 
     def _request(self, method: str, path: str, data: dict = None) -> dict:
         url = f"{self.base_url}{path}"
@@ -55,7 +60,8 @@ class RESTAdapter(RuntimeAdapter):
             "timeout_seconds": kwargs.get("timeout_seconds", 300),
             "cleanup": kwargs.get("cleanup", False),
         })
-        if "error" in resp:
+        # Only treat as error if "error" key exists AND has a truthy value
+        if resp.get("error"):
             return SpawnResult(run_id="", status="error", error=resp["error"])
         return SpawnResult(
             run_id=resp.get("run_id", "unknown"),

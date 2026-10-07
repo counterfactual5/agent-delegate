@@ -17,6 +17,7 @@ class OpenClawAdapter(RuntimeAdapter):
         self.agent_id = agent_id
         self.session_prefix = session_prefix
         self._openclaw_bin = os.environ.get("OPENCLAW_BIN", "openclaw")
+        self._completed_runs = {}  # Cache results from blocking spawn calls
 
     def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
         """通过 openclaw agent CLI 创建子 agent"""
@@ -39,22 +40,35 @@ class OpenClawAdapter(RuntimeAdapter):
                 cmd, capture_output=True, text=True, timeout=kwargs.get("timeout_seconds", 300)
             )
             if result.returncode == 0:
-                # 解析 run_id from output
-                run_id = result.stdout.strip().split("\n")[-1] if result.stdout else "unknown"
+                # Parse output: last line is run_id, everything else is the result
+                lines = result.stdout.strip().split("\n") if result.stdout else []
+                run_id = lines[-1] if lines else "unknown"
+                output_summary = "\n".join(lines[:-1]) if len(lines) > 1 else "completed"
+                
+                # Cache the result for listen() to retrieve
+                self._completed_runs[run_id] = WorkerOutput(
+                    success=True,
+                    summary=output_summary,
+                )
                 return SpawnResult(run_id=run_id, status="completed")
             else:
-                return SpawnResult(run_id="", status="error", error=result.stderr[:500])
+                error_msg = result.stderr[:500] if result.stderr else "Unknown error"
+                return SpawnResult(run_id="", status="error", error=error_msg)
         except subprocess.TimeoutExpired:
             return SpawnResult(run_id="", status="error", error="Timeout")
         except Exception as e:
             return SpawnResult(run_id="", status="error", error=str(e))
 
     def listen(self, run_id: str, timeout_ms: int = 30000) -> WorkerOutput:
-        """OpenClaw 模式下，spawn 本身是阻塞的，结果已在 SpawnResult 中"""
-        return WorkerOutput(
-            success=True,
-            summary=f"Run {run_id} completed",
-        )
+        """OpenClaw 模式下，spawn 本身是阻塞的，结果已缓存"""
+        if run_id in self._completed_runs:
+            return self._completed_runs[run_id]
+        else:
+            # Fallback for unknown run_id
+            return WorkerOutput(
+                success=False,
+                summary=f"Run {run_id} not found in completed cache",
+            )
 
     def send(self, message: str, **kwargs) -> None:
         """通过 openclaw message send 发送消息"""
