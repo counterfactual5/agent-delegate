@@ -48,21 +48,21 @@ def test_classify():
     assert classify_error(_err("")) == ErrorClass.UNKNOWN
 
 
-# CODING 链: gemini-pro-high(gemini), gpt-codex(openai), gpt-codex-mini(openai)
+# CODING 链: claude-sonnet-5.5(anthropic), gpt-4o(openai), gemini-2.5-flash(openai)
 def _coding_task():
     return Task(description="写一个完整的电商后端")
 
 
 def test_rate_limit_skips_whole_provider():
-    """gemini 429 → 跳过整个 gemini，落到 openai 首选。"""
+    """anthropic 429 → 跳过整个 anthropic，落到 openai 首选。"""
     adapter = ScriptedAdapter({
-        "gemini-pro-high": _err("429 rate limit"),
+        "claude-sonnet-5.5": _err("429 rate limit"),
     })
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
-    assert result.model == "gpt-codex"
-    assert adapter.calls == ["gemini-pro-high", "gpt-codex"]
+    assert result.model == "gpt-5.6-sol-high"
+    assert adapter.calls == ["claude-sonnet-5.5", "gpt-5.6-sol-high"]
 
 
 def test_server_error_retries_same_model_once():
@@ -72,7 +72,7 @@ def test_server_error_retries_same_model_once():
 
     def spawn(task, model, **kw):
         adapter.calls.append(model)
-        if model == "gemini-pro-high":
+        if model == "claude-sonnet-5.5":
             return next(flaky)
         return SpawnResult(run_id="ok", status="completed")
 
@@ -80,28 +80,28 @@ def test_server_error_retries_same_model_once():
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
-    assert result.model == "gemini-pro-high"
-    assert adapter.calls == ["gemini-pro-high", "gemini-pro-high"]
+    assert result.model == "claude-sonnet-5.5"
+    assert adapter.calls == ["claude-sonnet-5.5", "claude-sonnet-5.5"]
 
 
 def test_timeout_prefers_faster_candidate():
-    """超时 → 重排剩余候选，优先 speed_rank 最小者 (gpt-codex-mini, rank=3)。"""
+    """超时 → 重排剩余候选，优先 speed_rank 最小者 (gemini-2.5-flash, rank=2)。"""
     adapter = ScriptedAdapter({
-        "gemini-pro-high": _err("request timed out"),
+        "claude-sonnet-5.5": _err("request timed out"),
     })
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
-    # gpt-codex(rank5) vs gpt-codex-mini(rank3) → mini 先跑
-    assert result.model == "gpt-codex-mini"
-    assert adapter.calls == ["gemini-pro-high", "gpt-codex-mini"]
+    # gpt-4o(rank5) vs gemini-2.5-flash(rank2) → mini 先跑
+    assert result.model == "gemini-2.5-flash"
+    assert adapter.calls == ["claude-sonnet-5.5", "gemini-2.5-flash"]
 
 
 def test_all_fail_returns_error_with_audit():
     adapter = ScriptedAdapter({
-        "gemini-pro-high": _err("429"),
-        "gpt-codex": _err("500"),
-        "gpt-codex-mini": _err("500"),
+        "claude-sonnet-5.5": _err("429"),
+        "gpt-5.6-sol-high": _err("500"),
+        "gemini-2.5-flash": _err("500"),
     })
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
@@ -120,15 +120,15 @@ def test_success_records_attempts():
     attempt = result.attempts[-1]
     assert attempt.outcome == "ok"
     assert attempt.status == "completed"
-    assert attempt.model == "gemini-pro-high"
-    assert attempt.provider == "gemini"
+    assert attempt.model == "claude-sonnet-5.5"
+    assert attempt.provider == "anthropic"
 
 
 def test_failure_and_skip_records_attempts():
     adapter = ScriptedAdapter({
-        "gemini-pro-high": _err("429"),
-        "gpt-codex": _err("500"),
-        "gpt-codex-mini": _err("500"),
+        "claude-sonnet-5.5": _err("429"),
+        "gpt-5.6-sol-high": _err("500"),
+        "gemini-2.5-flash": _err("500"),
     })
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
@@ -137,11 +137,11 @@ def test_failure_and_skip_records_attempts():
     first_attempt = result.attempts[0]
     assert first_attempt.outcome == "fail"
     assert first_attempt.status == "error"
-    assert first_attempt.model == "gemini-pro-high"
-    assert first_attempt.provider == "gemini"
+    assert first_attempt.model == "claude-sonnet-5.5"
+    assert first_attempt.provider == "anthropic"
     assert first_attempt.error_class == "rate_limit"
     assert "429" in (first_attempt.error or "")
-    assert str(first_attempt).startswith("fail gemini-pro-high [rate_limit]")
+    assert str(first_attempt).startswith("fail claude-sonnet-5.5 [rate_limit]")
 
 
 def test_adapter_exception_handled_as_failure():
@@ -152,7 +152,7 @@ def test_adapter_exception_handled_as_failure():
 
         def spawn(self, task: str, model: str, **kwargs) -> SpawnResult:
             self.calls.append(model)
-            if model == "gemini-pro-high":
+            if model == "claude-sonnet-5.5":
                 raise ConnectionResetError("network dropped")
             return SpawnResult(run_id="ok-fallback", status="completed")
 
@@ -169,20 +169,20 @@ def test_adapter_exception_handled_as_failure():
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "completed"
-    assert result.model == "gpt-codex"
-    assert adapter.calls == ["gemini-pro-high", "gpt-codex"]
+    assert result.model == "gpt-5.6-sol-high"
+    assert adapter.calls == ["claude-sonnet-5.5", "gpt-5.6-sol-high"]
     assert len(result.attempts) >= 2
     failed_attempt = result.attempts[0]
     assert failed_attempt.outcome == "fail"
     assert failed_attempt.status == "error"
-    assert failed_attempt.model == "gemini-pro-high"
+    assert failed_attempt.model == "claude-sonnet-5.5"
     assert "ConnectionResetError: network dropped" in (failed_attempt.error or "")
 
 
 def test_non_terminal_status_preserved_in_attempts():
     """pending/running 等非终态 status 应在 AttemptRecord 中原样保留，而非默认被覆盖。"""
     adapter = ScriptedAdapter({
-        "gemini-pro-high": SpawnResult(run_id="run-1", status="pending", error="still processing"),
+        "claude-sonnet-5.5": SpawnResult(run_id="run-1", status="pending", error="still processing"),
     })
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())

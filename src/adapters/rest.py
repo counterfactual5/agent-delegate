@@ -63,9 +63,29 @@ class RESTAdapter(RuntimeAdapter):
         # Only treat as error if "error" key exists AND has a truthy value
         if resp.get("error"):
             return SpawnResult(run_id="", status="error", error=resp["error"])
+
+        run_id = resp.get("run_id", "unknown")
+        status = resp.get("status", "pending")
+
+        # If wait is enabled and not yet in a terminal state, poll until done
+        if kwargs.get("wait", True) and status not in ("completed", "error"):
+            timeout_ms = kwargs.get("timeout_seconds", 300) * 1000
+            output = self.listen(run_id, timeout_ms=timeout_ms)
+            if output.success:
+                res = SpawnResult(run_id=run_id, status="completed")
+            else:
+                res = SpawnResult(run_id="", status="error", error=output.summary)
+            if hasattr(res, "summary"):
+                res.summary = output.summary
+            if hasattr(res, "artifacts"):
+                res.artifacts = output.artifacts
+            if hasattr(res, "output_path"):
+                res.output_path = output.output_path
+            return res
+
         return SpawnResult(
-            run_id=resp.get("run_id", "unknown"),
-            status=resp.get("status", "pending"),
+            run_id=run_id,
+            status=status,
         )
 
     def listen(self, run_id: str, timeout_ms: int = 30000) -> WorkerOutput:

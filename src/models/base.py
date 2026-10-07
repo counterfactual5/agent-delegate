@@ -128,6 +128,9 @@ class SpawnResult:
     error: Optional[str] = None
     model: Optional[str] = None        # 实际命中的模型
     attempts: list[AttemptRecord] = field(default_factory=list)  # 降级审计轨迹
+    summary: Optional[str] = None      # 子 agent 的产出摘要
+    artifacts: list = field(default_factory=list)  # 产物路径
+    output_path: Optional[str] = None  # 主产出路径
 
 
 @dataclass
@@ -221,31 +224,80 @@ class FallbackChain:
         return self.candidates[0] if self.candidates else None
 
 
-# 预定义的 6 档候选链
+# EXAMPLE ONLY — these model names WILL go stale. For production use, load
+# chains from config via load_chains() or pass Router(adapter, chains={...}).
+# Source: artificialanalysis.ai leaderboard, late 2025.
 DEFAULT_CHAINS: dict[TaskType, FallbackChain] = {
     TaskType.TRIVIAL: FallbackChain(candidates=[
-        ModelCandidate("gemini-flash", "gemini", speed_rank=1, cost_rank=1, context_window=32000),
-        ModelCandidate("gpt-flash", "openai", speed_rank=2, cost_rank=2, context_window=16000),
+        ModelCandidate("gemini-3.5-flash-lite", "google", speed_rank=1, cost_rank=1, context_window=1000000),
+        ModelCandidate("gpt-5.6-sol-low", "openai", speed_rank=2, cost_rank=2, context_window=1000000),
     ]),
     TaskType.STANDARD: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro", "gemini", speed_rank=3, cost_rank=3, context_window=128000),
-        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4, context_window=128000),
+        ModelCandidate("gemini-2.5-flash", "google", speed_rank=3, cost_rank=3, context_window=1000000),
+        ModelCandidate("gpt-5.6-sol-medium", "openai", speed_rank=4, cost_rank=4, context_window=1000000),
     ]),
     TaskType.CODING: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6, context_window=128000),
-        ModelCandidate("gpt-codex", "openai", speed_rank=5, cost_rank=5, context_window=128000),
-        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=3, context_window=64000),
+        ModelCandidate("claude-sonnet-5.5", "anthropic", speed_rank=6, cost_rank=6, context_window=1000000),
+        ModelCandidate("gpt-5.6-sol-high", "openai", speed_rank=5, cost_rank=5, context_window=1000000),
+        ModelCandidate("gemini-2.5-flash", "google", speed_rank=3, cost_rank=3, context_window=1000000),
     ]),
     TaskType.RESEARCH: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6, context_window=1000000),
-        ModelCandidate("gpt-standard", "openai", speed_rank=4, cost_rank=4, context_window=128000),
+        ModelCandidate("gemini-4-argon", "google", speed_rank=5, cost_rank=5, context_window=1000000),
+        ModelCandidate("claude-sonnet-5.5", "anthropic", speed_rank=6, cost_rank=6, context_window=1000000),
     ]),
     TaskType.LIGHT_CODING: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-low", "gemini", speed_rank=4, cost_rank=3, context_window=128000),
-        ModelCandidate("gpt-codex-mini", "openai", speed_rank=3, cost_rank=2, context_window=64000),
+        ModelCandidate("gemini-2.5-flash", "google", speed_rank=3, cost_rank=3, context_window=1000000),
+        ModelCandidate("gpt-5.6-sol-low", "openai", speed_rank=2, cost_rank=2, context_window=1000000),
     ]),
     TaskType.AUDIT: FallbackChain(candidates=[
-        ModelCandidate("gemini-pro-high", "gemini", speed_rank=6, cost_rank=6, context_window=128000),
-        ModelCandidate("gpt-codex-max", "openai", speed_rank=7, cost_rank=7, context_window=200000),
+        ModelCandidate("claude-opus-5", "anthropic", speed_rank=7, cost_rank=7, context_window=1000000),
+        ModelCandidate("gpt-6.1-sol", "openai", speed_rank=6, cost_rank=6, context_window=1000000),
     ]),
 }
+
+
+def load_chains(path: str) -> dict:
+    """
+    Load task-type chains from a YAML or JSON config file.
+
+    Recommended over DEFAULT_CHAINS for production — hardcoded model names
+    go stale; config files stay current.
+
+    YAML format:
+        trivial:
+          - model_id: gemini-3.5-flash-lite
+            provider: google
+            speed_rank: 1
+            cost_rank: 1
+            context_window: 1000000
+          - model_id: gpt-5.6-sol-low
+            provider: openai
+            speed_rank: 2
+            cost_rank: 2
+        coding:
+          - model_id: claude-sonnet-5.5
+            provider: anthropic
+            speed_rank: 6
+            cost_rank: 6
+
+    Usage:
+        chains = load_chains("chains.yaml")
+        router = Router(adapter, chains=chains)
+    """
+    import json
+    import yaml  # optional dependency; pip install pyyaml
+
+    with open(path) as f:
+        if path.endswith((".yaml", ".yml")):
+            raw = yaml.safe_load(f)
+        else:
+            raw = json.load(f)
+
+    chains = {}
+    for task_type_str, candidates in raw.items():
+        task_type = TaskType(task_type_str)
+        chain = FallbackChain(candidates=[
+            ModelCandidate(**c) for c in candidates
+        ])
+        chains[task_type] = chain
+    return chains
