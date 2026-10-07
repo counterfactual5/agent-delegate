@@ -24,12 +24,6 @@ class TaskType(Enum):
     DOC = "doc"                   # 文档生成（白皮书、PPT）
 
 
-class ContextDependency(Enum):
-    NONE = "none"        # 无依赖
-    STRONG = "strong"    # 强依赖主会话上下文 → 主 Agent 处理
-    WEAK = "weak"        # 弱/无依赖 → 可外包给子 Agent
-
-
 class DependencyType(Enum):
     INDEPENDENT = "independent"      # 无依赖 → 并行 spawn
     SEQUENTIAL = "sequential"        # 串行依赖 → 合并打包
@@ -51,7 +45,6 @@ class Task:
     """待调度的任务"""
     description: str
     task_type: Optional[TaskType] = None
-    context_dependency: Optional[ContextDependency] = None
     dependency_type: Optional[DependencyType] = None
     model_override: Optional[str] = None
     timeout_seconds: int = 300
@@ -159,17 +152,12 @@ class RuntimeAdapter(ABC):
         创建子 agent 执行任务。
         
         Args:
-            task: 完整的任务描述（已打包上下文）
-            model: 模型 ID
-            **kwargs: 扩展参数
-                - thinking: str, 思考级别 ("off"|"standard"|"high")
-                - timeout_seconds: int, 超时
-                - cleanup: bool, 完成后清理
-                - label: str, Agent 标签
-                - context: str, 上下文模式 ("isolated"|"fork")
+            task: Packed task description (context + instructions)
+            model: Model ID
+            **kwargs: Runtime-specific options (timeout_seconds, wait, etc.)
         
         Returns:
-            SpawnResult with run_id
+            SpawnResult with terminal status (completed or error).
         """
         ...
 
@@ -183,10 +171,9 @@ class RuntimeAdapter(ABC):
         """
         ...
 
-    @abstractmethod
     def send(self, message: str, **kwargs) -> None:
         """
-        发送消息到用户/通道。
+        Optional: send a notification message. No-op by default.
         
         Args:
             message: 消息内容
@@ -196,7 +183,6 @@ class RuntimeAdapter(ABC):
         """
         ...
 
-    @abstractmethod
     def list_runs(self, **kwargs) -> list:
         """列出当前活跃的子 agent 运行。"""
         ...

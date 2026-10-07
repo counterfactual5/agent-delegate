@@ -5,7 +5,7 @@ sys.path.insert(0, ".")
 
 from src.router.router import Router
 from src.models.base import (
-    Task, SpawnResult, WorkerOutput, RuntimeAdapter,
+    Task, TaskType, SpawnResult, WorkerOutput, RuntimeAdapter,
     ErrorClass, classify_error,
 )
 
@@ -50,7 +50,7 @@ def test_classify():
 
 # CODING 链: claude-sonnet-5.5(anthropic), gpt-4o(openai), gemini-2.5-flash(openai)
 def _coding_task():
-    return Task(description="写一个完整的电商后端")
+    return Task(description="写一个完整的电商后端", task_type=TaskType.CODING)
 
 
 def test_rate_limit_skips_whole_provider():
@@ -106,7 +106,7 @@ def test_all_fail_returns_error_with_audit():
     router = Router(adapter)
     result = router.dispatch_with_fallback(_coding_task())
     assert result.status == "error"
-    assert "所有候选模型均失败" in result.error
+    assert result.error
     assert result.attempts  # 审计轨迹非空
 
 

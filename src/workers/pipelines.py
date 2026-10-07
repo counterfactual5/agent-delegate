@@ -141,7 +141,7 @@ RESEARCH_PIPELINE = Pipeline(
 
 DOC_PIPELINE = Pipeline(
     name="doc",
-    description="9 阶段文档流水线：Scanner → Planner → Expander → Editor → Quality → Kami → PDF/PPTX",
+    description="8-stage doc pipeline: Scanner → Planner → Expander → Merger → Quality → Editor → Brief → Render",
     stages=[
         Stage(name="Scanner", role_prompt="扫描本地项目结构，提取代码和文档元信息。",
               input_gates=[], output_artifacts=["SCAN.md"], model_tier="standard"),
@@ -155,10 +155,10 @@ DOC_PIPELINE = Pipeline(
               input_gates=["WHITEPAPER.md"], output_artifacts=["QUALITY_REPORT.md"], model_tier="standard"),
         Stage(name="Editor", role_prompt="根据质量报告修复问题。",
               input_gates=["WHITEPAPER.md", "QUALITY_REPORT.md"], output_artifacts=["WHITEPAPER.md"], model_tier="heavy"),
-        Stage(name="Kami Brief", role_prompt="生成排版指令 KAMI_BRIEF.md 和 PPT_OUTLINE.md。",
-              input_gates=["WHITEPAPER.md"], output_artifacts=["KAMI_BRIEF.md", "PPT_OUTLINE.md"], model_tier="standard"),
-        Stage(name="Render", role_prompt="调用 Kami 渲染器，生成 HTML/PDF/PPTX。",
-              input_gates=["KAMI_BRIEF.md"], output_artifacts=["kami/"], model_tier="light"),
+        Stage(name="Brief", role_prompt="Generate layout instructions RENDER_BRIEF.md and SLIDES_OUTLINE.md for the target output format.",
+              input_gates=["WHITEPAPER.md"], output_artifacts=["RENDER_BRIEF.md", "SLIDES_OUTLINE.md"], model_tier="standard"),
+        Stage(name="Render", role_prompt="Render the document using a standard tool (pandoc, marp, or similar) into HTML/PDF/slide format.",
+              input_gates=["RENDER_BRIEF.md"], output_artifacts=["output/"], model_tier="light"),
     ],
 )
 

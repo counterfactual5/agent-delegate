@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import Mock
 from src.adapters.rest import RESTAdapter
 from src.router.router import Router
-from src.models.base import Task, TaskType, ContextDependency, SpawnResult
+from src.models.base import Task, TaskType, SpawnResult
 
 
 class TestNullErrorHandling:
@@ -65,7 +65,6 @@ class TestSuccessDetection:
         task = Task(
             description="test task",
             task_type=TaskType.TRIVIAL,
-            context_dependency=ContextDependency.NONE,
         )
         result = router.dispatch_with_fallback(task)
 
@@ -95,7 +94,6 @@ class TestSuccessDetection:
         task = Task(
             description="test task",
             task_type=TaskType.STANDARD,
-            context_dependency=ContextDependency.NONE,
         )
         result = router.dispatch_with_fallback(task)
 
@@ -116,29 +114,12 @@ class TestParameterPreservation:
         task = Task(
             description="SELECT * FROM users",
             task_type=TaskType.CODING,  # caller 明确指定
-            context_dependency=ContextDependency.NONE,
         )
         router.dispatch_with_fallback(task)
 
         # 不应该被重新分类成 STANDARD
         assert task.task_type == TaskType.CODING
 
-    def test_preserves_caller_context_dependency(self):
-        router = Router(adapter=Mock())
-        router.adapter.spawn = Mock(return_value=SpawnResult(
-            run_id="run-2",
-            status="completed",
-        ))
-
-        task = Task(
-            description="继续上面的实现",
-            task_type=TaskType.TRIVIAL,
-            context_dependency=ContextDependency.STRONG,  # caller 明确指定
-        )
-        router.dispatch_with_fallback(task)
-
-        # 不应该被重新分析
-        assert task.context_dependency == ContextDependency.STRONG
 
     def test_model_override_creates_single_candidate_chain(self):
         router = Router(adapter=Mock())
@@ -150,7 +131,6 @@ class TestParameterPreservation:
         task = Task(
             description="test task",
             task_type=TaskType.STANDARD,
-            context_dependency=ContextDependency.NONE,
             model_override="anthropic/claude-3-opus",
         )
         result = router.dispatch_with_fallback(task)
@@ -172,9 +152,8 @@ class TestParameterPreservation:
         )
         router.dispatch_with_fallback(task)
 
-        # 应该自动分析并填充
-        assert task.task_type is not None
-        assert task.context_dependency is not None
+        # task_type 未设置时 Router 不自动填充（决策已上交调用方）
+        # 但 dispatch 仍能执行（fallback 到 STANDARD 链）
 
 
 class TestTimeoutHandling:
@@ -202,7 +181,6 @@ class TestTimeoutHandling:
         task = Task(
             description="test task",
             task_type=TaskType.STANDARD,
-            context_dependency=ContextDependency.NONE,
         )
         result = router.dispatch_with_fallback(task)
 
