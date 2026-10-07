@@ -152,6 +152,72 @@ def test_pipeline_runner_retry_success():
         del PIPELINES["test_retry"]
 
 
+def test_stage_run_preserves_rounds_and_duration():
+    """阶段审计应逐轮保留 SpawnResult（spawn_attempts）并记录耗时"""
+    mock_router = Mock(spec=Router)
+    call_count = 0
+
+    def mock_dispatch(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SpawnResult(run_id="run-fail", status="error", error="API error")
+        return SpawnResult(run_id="run-success", status="completed")
+
+    mock_router.dispatch_with_fallback.side_effect = mock_dispatch
+
+    test_pipeline = Pipeline(
+        name="test_rounds",
+        description="测试逐轮保留",
+        stages=[
+            Stage(
+                name="Planner",
+                role_prompt="Plan something",
+                input_gates=[],
+                output_artifacts=["PLAN.md"],
+                max_retries=2,
+            )
+        ],
+    )
+    PIPELINES["test_rounds"] = test_pipeline
+    try:
+        runner = PipelineRunner(router=mock_router)
+        result = runner.run("test_rounds")
+
+        stage_run = result.stage_runs[0]
+        assert stage_run.status == StageStatus.COMPLETED
+        assert len(stage_run.spawn_attempts) == 2  # 两轮 SpawnResult 都在
+        assert stage_run.spawn_attempts[0].run_id == "run-fail"
+        assert stage_run.spawn_attempts[1].run_id == "run-success"
+        assert stage_run.duration_ms is not None
+        assert stage_run.duration_ms >= 0
+    finally:
+        del PIPELINES["test_rounds"]
+
+
+def test_skipped_stage_duration_is_zero_and_summable():
+    """SKIPPED 阶段报 duration_ms=0.0，下游聚合不会见到 None。"""
+    test_pipeline = Pipeline(
+        name="test_skip_dur",
+        description="测试跳过阶段耗时",
+        stages=[
+            Stage(name="A", role_prompt="a", input_gates=["MISSING.md"],
+                  output_artifacts=["A.md"]),
+            Stage(name="B", role_prompt="b", input_gates=["A.md"],
+                  output_artifacts=["B.md"]),
+        ],
+    )
+    PIPELINES["test_skip_dur"] = test_pipeline
+    try:
+        result = PipelineRunner(router=Mock()).run("test_skip_dur")
+        assert all(sr.status == StageStatus.SKIPPED for sr in result.stage_runs)
+        assert all(sr.duration_ms == 0.0 for sr in result.stage_runs)
+        total = sum(sr.duration_ms for sr in result.stage_runs)  # must not raise
+        assert total == 0.0
+    finally:
+        del PIPELINES["test_skip_dur"]
+
+
 def test_pipeline_runner_retry_exhausted_and_cascade_fail():
     """测试重试耗尽导致失败，后续阶段自动级联跳过"""
     mock_router = Mock(spec=Router)

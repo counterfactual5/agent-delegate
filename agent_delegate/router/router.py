@@ -7,10 +7,15 @@ The Router handles HOW: retries, provider isolation, degradation,
 and audit trail.
 """
 
+import logging
+import time
+
 from agent_delegate.models.base import (
     Task, TaskType, FallbackChain, ModelCandidate, DEFAULT_CHAINS, SpawnResult,
     RuntimeAdapter, ErrorClass, classify_error, AttemptRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Router:
@@ -63,6 +68,8 @@ class Router:
         - adapter exceptions (programming): re-raise
 
         Returns SpawnResult with structured AttemptRecord audit trail.
+        Attempt outcome values: ok | fail | skip | incomplete (non-terminal
+        status contract violation).
         """
         if task.model_override:
             chain = FallbackChain(candidates=[
@@ -83,6 +90,7 @@ class Router:
         attempts: list[AttemptRecord] = []
         dead_providers: set[str] = set()
         retried_server: set[str] = set()
+        last_non_terminal: tuple[str, str] | None = None  # (run_id, status)
 
         queue = list(chain.candidates)
         while queue:
@@ -95,6 +103,8 @@ class Router:
                     reason=f"provider {candidate.provider} blacklisted",
                 ))
                 continue
+
+            start_time = time.perf_counter()
 
             try:
                 result = self.adapter.spawn(
@@ -112,6 +122,8 @@ class Router:
             except Exception:
                 raise
 
+
+            duration_ms = (time.perf_counter() - start_time) * 1000
             if result.status == "completed":
                 result.model = candidate.model_id
                 attempts.append(AttemptRecord(
@@ -119,9 +131,27 @@ class Router:
                     provider=candidate.provider,
                     outcome="ok",
                     status=result.status,
+                    duration_ms=duration_ms,
                 ))
                 result.attempts = attempts
                 return result
+
+            # Handle non-terminal status (contract violation)
+            if result.status not in ("completed", "error"):
+                last_non_terminal = (result.run_id, result.status)
+                logger.info(
+                    "Non-terminal status for model=%s run_id=%s status=%s",
+                    candidate.model_id, result.run_id, result.status
+                )
+                attempts.append(AttemptRecord(
+                    model=candidate.model_id,
+                    provider=candidate.provider,
+                    outcome="incomplete",
+                    status=result.status,
+                    reason=f"non-terminal status: {result.status}",
+                    duration_ms=duration_ms,
+                ))
+                continue
 
             err_class = classify_error(result)
             attempts.append(AttemptRecord(
@@ -131,21 +161,51 @@ class Router:
                 status=result.status,
                 error_class=err_class.value,
                 error=result.error,
+                duration_ms=duration_ms,
             ))
 
             if err_class in (ErrorClass.RATE_LIMIT, ErrorClass.AUTH):
+                logger.warning(
+                    "Blacklisting provider %s due to %s error",
+                    candidate.provider, err_class.value
+                )
                 dead_providers.add(candidate.provider)
             elif err_class == ErrorClass.SERVER_ERROR and candidate.model_id not in retried_server:
+                logger.info(
+                    "Retrying model %s after SERVER_ERROR",
+                    candidate.model_id
+                )
                 retried_server.add(candidate.model_id)
                 queue.insert(0, candidate)
             elif err_class == ErrorClass.TIMEOUT:
+                logger.debug("Re-sorting queue by speed_rank after TIMEOUT")
                 queue.sort(key=lambda c: c.speed_rank)
             elif err_class == ErrorClass.CONTEXT_LENGTH:
                 failed_window = candidate.context_window
                 queue = [c for c in queue if c.context_window > failed_window]
+                logger.debug(
+                    "Filtered queue to context_window > %d, %d candidates remain",
+                    failed_window, len(queue)
+                )
                 queue.sort(key=lambda c: (-c.context_window, c.speed_rank))
 
+        # Compact aggregate summary; the full per-attempt trail stays in `attempts`.
+        fail_classes: dict[str, int] = {}
+        for a in attempts:
+            if a.outcome == "fail" and a.error_class:
+                fail_classes[a.error_class] = fail_classes.get(a.error_class, 0) + 1
+        attempted = sum(1 for a in attempts if a.outcome != "skip")
+        base = (f"all candidates exhausted (attempted={attempted}, "
+                f"blacklisted={sorted(dead_providers)}, error_classes={fail_classes})")
+        if last_non_terminal:
+            run_id, status = last_non_terminal
+            error = f"{base} (last non-terminal run_id={run_id}, status={status})"
+        else:
+            run_id = ""
+            error = base
+        
+        logger.warning("All candidates exhausted: %s", error)
         return SpawnResult(
-            run_id="", status="error",
-            error="all candidates exhausted", attempts=attempts,
+            run_id=run_id, status="error",
+            error=error, attempts=attempts,
         )

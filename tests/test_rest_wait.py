@@ -2,7 +2,10 @@
 import sys
 sys.path.insert(0, ".")
 
+import http.client
 from unittest.mock import Mock, patch
+import pytest
+import urllib.error
 from agent_delegate.adapters.rest import RESTAdapter
 
 
@@ -72,3 +75,60 @@ class TestWaitTruePolling:
         result = a.spawn(task="t", model="m")
         assert result.status == "completed"
         assert a._request.call_count == 1  # no polling needed
+
+    def test_polling_timeout_preserves_run_id(self):
+        """When polling times out, SpawnResult should preserve the run_id."""
+        a = _adapter()
+        a._request = Mock(return_value={"run_id": "r-timeout", "status": "pending"})
+        
+        # Mock listen to return failure (timeout)
+        from agent_delegate.models.base import WorkerOutput
+        a.listen = Mock(return_value=WorkerOutput(success=False, summary="polling timeout after 5000ms"))
+        
+        result = a.spawn(task="t", model="m", wait=True, timeout_seconds=5)
+        
+        assert result.status == "error"
+        assert result.run_id == "r-timeout"  # run_id preserved
+        assert "timeout" in result.error.lower()
+        a.listen.assert_called_once()
+
+    def test_urlopen_network_error_returns_error_payload(self):
+        """urlopen 网络级异常应转为 error 字典，spawn 返回 status=error"""
+        a = _adapter()
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("conn refused")):
+            resp = a._request("GET", "/listen/r1")
+            assert "error" in resp
+            result = a.spawn(task="t", model="m")
+        assert result.status == "error"
+
+    def test_programming_error_propagates(self):
+        """编程类异常（TypeError）不再被 _request 吞掉，应向外抛出"""
+        a = _adapter()
+        with patch("urllib.request.urlopen", side_effect=TypeError("bad type")):
+            with pytest.raises(TypeError):
+                a._request("GET", "/listen/r1")
+
+    def test_http_client_exception_returns_error_payload(self):
+        """http.client.HTTPException (BadStatusLine) should be caught and return error dict."""
+        a = _adapter()
+        with patch("urllib.request.urlopen",
+                   side_effect=http.client.BadStatusLine("garbage")):
+            resp = a._request("GET", "/listen/r1")
+            assert "error" in resp
+            result = a.spawn(task="t", model="m")
+        assert result.status == "error"
+
+    def test_spawn_timeout_passthrough(self):
+        """spawn() should pass timeout_seconds to _request as timeout parameter."""
+        a = _adapter()
+        mock_resp = {"run_id": "r1", "status": "completed"}
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = Mock(return_value=Mock(read=lambda: b'{"run_id": "r1", "status": "completed"}'))
+            mock_urlopen.return_value.__exit__ = Mock(return_value=False)
+            result = a.spawn(task="t", model="m", timeout_seconds=5)
+        
+        # Verify urlopen was called with timeout=5
+        assert mock_urlopen.called
+        call_kwargs = mock_urlopen.call_args
+        assert call_kwargs[1]["timeout"] == 5

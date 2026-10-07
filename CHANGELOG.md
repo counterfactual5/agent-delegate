@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+- **Error signature precision**: numeric status codes now match with digit
+  boundaries (`"1503"` no longer triggers `SERVER_ERROR` via the `"500"`
+  needle); bare `"too long"` removed from `CONTEXT_LENGTH` — real provider
+  phrasings (`"prompt is too long"`, `"input is too long"`,
+  `"request entity too large"`, ...) are matched instead, and `"took too long"`
+  now classifies as `TIMEOUT`.
+- **Non-terminal spawn contract**: `dispatch_with_fallback` records
+  `outcome="incomplete"` for non-terminal statuses (pending/running) instead of
+  counting them as failures, and the exhausted `SpawnResult` preserves the last
+  non-terminal `run_id` for tracking/cancellation.
+
 ### Removed
 - **Decision layer**: `analyze_context`, `classify_task`, `dispatch`, and the
   `ContextDependency` enum. Decision-making belongs to the caller (LLM or config);
@@ -15,6 +27,13 @@
 - **RESTAdapter kwargs configuration**: Flexible kwargs configuration for base URL, headers, and endpoints; `wait=True` semantics available via `RESTAdapter.spawn(wait=True)` which polls until terminal status.
 
 ### Fixed
+- **RESTAdapter**: `_request` no longer swallows programming errors
+  (TypeError/KeyError) as error payloads — only network/protocol exceptions are
+  converted; polling-failure logging is throttled (first + every 10th); poll
+  failure/timeout results preserve `run_id`.
+- **OpenClawAdapter**: `spawn` now returns the parsed `summary` instead of
+  `None`; `send()` is best-effort (TimeoutExpired/OSError logged, not raised).
+- **Router**: exception-path attempt durations are no longer double-computed.
 - **OpenClaw WorkerOutput fields**: Standardized cached `WorkerOutput` construction in `OpenClawAdapter` to align with base model field expectations.
 - **Router custom chains fallback**: Added robust fallback handling when custom `chains` mappings do not define a requested task type, falling back to `TaskType.STANDARD` or the first available configured chain.
 

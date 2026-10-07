@@ -4,6 +4,7 @@ OpenClaw RuntimeAdapter 实现
 将 agent-delegate 的抽象接口映射到 OpenClaw 的 sessions_spawn / sessions_yield API。
 """
 
+import logging
 import subprocess
 import os
 from collections import OrderedDict
@@ -11,6 +12,8 @@ from collections import OrderedDict
 from agent_delegate.models.base import RuntimeAdapter, SpawnResult, WorkerOutput
 
 _MAX_CACHED_RUNS = 100
+
+logger = logging.getLogger(__name__)
 
 
 class OpenClawAdapter(RuntimeAdapter):
@@ -55,8 +58,12 @@ class OpenClawAdapter(RuntimeAdapter):
                         summary=output_summary,
                     )
                     if len(self._completed_runs) > _MAX_CACHED_RUNS:
-                        self._completed_runs.popitem(last=False)
-                return SpawnResult(run_id=run_id, status="completed")
+                        evicted_run_id, _ = self._completed_runs.popitem(last=False)
+                        logger.debug(
+                            "Evicted run_id=%s from cache (FIFO, size=%d)",
+                            evicted_run_id, _MAX_CACHED_RUNS
+                        )
+                return SpawnResult(run_id=run_id, status="completed", summary=output_summary)
             else:
                 error_msg = result.stderr[:500] if result.stderr else "Unknown error"
                 return SpawnResult(run_id="", status="error", error=error_msg)
@@ -80,13 +87,16 @@ class OpenClawAdapter(RuntimeAdapter):
             )
 
     def send(self, message: str, **kwargs) -> None:
-        """通过 openclaw message send 发送消息"""
+        """通过 openclaw message send 发送消息（best-effort：失败只记日志，不抛异常）"""
         channel = kwargs.get("channel", "telegram")
         to = kwargs.get("to")
         cmd = [self._openclaw_bin, "message", "send", "--channel", channel, "-m", message]
         if to:
             cmd.extend(["-t", to])
-        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("send() failed for channel=%s: %s", channel, e)
 
     def list_runs(self, **kwargs) -> list:
         """列出活跃运行"""

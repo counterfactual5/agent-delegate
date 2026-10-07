@@ -148,9 +148,57 @@ def test_exceeds_classification_tightened():
     assert classify_error(res_quota) != ErrorClass.CONTEXT_LENGTH
 
 
+def test_numeric_signature_digit_boundaries():
+    """裸数字签名必须带数字边界："1503"/"4290"/端口 5000 不得误触发 500/429 分类。"""
+    cases = [
+        ("request 1503 failed", ErrorClass.UNKNOWN),
+        ("error code 4290 while calling model", ErrorClass.UNKNOWN),
+        ("connection to port 5000 refused", ErrorClass.UNKNOWN),
+        ("HTTP 500 internal error", ErrorClass.SERVER_ERROR),
+        ("HTTP 503 unavailable", ErrorClass.SERVER_ERROR),
+        ("HTTP 429 too many requests", ErrorClass.RATE_LIMIT),
+    ]
+    for error_text, expected in cases:
+        result = SpawnResult(run_id='t', status='error', error=error_text)
+        actual = classify_error(result)
+        assert actual == expected, \
+            f"'{error_text}' should classify as {expected}, got {actual}"
+    print("✓ Numeric signature digit boundaries passed")
+
+
+def test_too_long_reclassification():
+    """裸 "too long" 移出 CONTEXT_LENGTH：延迟措辞不再误判，超时措辞归 TIMEOUT。"""
+    res = SpawnResult(run_id='t', status='error', error="request took too long")
+    assert classify_error(res) == ErrorClass.TIMEOUT
+    res2 = SpawnResult(run_id='t', status='error', error="response latency too long")
+    assert classify_error(res2) == ErrorClass.UNKNOWN
+    assert classify_error(res2) != ErrorClass.CONTEXT_LENGTH
+    print("✓ Bare 'too long' reclassification passed")
+
+
+def test_real_provider_context_messages():
+    """真实厂商上下文超长措辞仍应命中 CONTEXT_LENGTH。"""
+    messages = [
+        "this model's maximum context length is 8192 tokens",
+        "prompt is too long: 200000 tokens > 190000 maximum",
+        "input is too long for this model",
+        "input too long",
+        "request entity too large",
+    ]
+    for error_text in messages:
+        result = SpawnResult(run_id='t', status='error', error=error_text)
+        actual = classify_error(result)
+        assert actual == ErrorClass.CONTEXT_LENGTH, \
+            f"'{error_text}' should classify as CONTEXT_LENGTH, got {actual}"
+    print("✓ Real provider context messages passed")
+
+
 if __name__ == "__main__":
     test_context_length_error_classification()
     test_context_length_fallback()
     test_all_error_classifications()
     test_exceeds_classification_tightened()
+    test_numeric_signature_digit_boundaries()
+    test_too_long_reclassification()
+    test_real_provider_context_messages()
     print("\n✅ All Phase 2 tests passed!")

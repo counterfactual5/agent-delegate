@@ -5,12 +5,16 @@ Pipeline Runner - 高健壮性流水线执行引擎
 """
 
 import copy
+import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Set
 
 from agent_delegate.models.base import SpawnResult, Task, TaskType
 from agent_delegate.router.router import Router
 from agent_delegate.workers.pipelines import PIPELINES, Pipeline, Stage, StageStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,6 +26,9 @@ class StageRun:
     spawn_result: Optional[SpawnResult] = None
     error: Optional[str] = None
     output_artifacts: list[str] = field(default_factory=list)
+    attempt_chain: list = field(default_factory=list)
+    spawn_attempts: list[SpawnResult] = field(default_factory=list)
+    duration_ms: Optional[float] = None
 
 
 @dataclass
@@ -80,6 +87,10 @@ class PipelineRunner:
         for stage in pipeline.stages:
             # 1. 当前阶段门禁不满足
             if not pipeline.validate_gates(stage, current_artifacts):
+                logger.warning(
+                    "Stage '%s' skipped: missing input_gates=%s",
+                    stage.name, stage.input_gates
+                )
                 stage.status = StageStatus.SKIPPED
                 stage.error = f"Input gates not satisfied: {stage.input_gates}"
                 stage_run = StageRun(
@@ -88,6 +99,7 @@ class PipelineRunner:
                     retries=0,
                     error=stage.error,
                     output_artifacts=[],
+                    duration_ms=0.0,
                 )
                 stage_runs.append(stage_run)
                 has_cascade_skip = True
@@ -100,9 +112,16 @@ class PipelineRunner:
             success = False
             last_spawn_result: Optional[SpawnResult] = None
             last_error: Optional[str] = None
+            stage_started = time.perf_counter()
+            spawn_attempts: list[SpawnResult] = []
 
             # 总尝试次数 = 1 次首次执行 + max_retries 次重试
             while attempt <= max_retries:
+                if attempt > 0:
+                    logger.info(
+                        "Retrying stage '%s', attempt %d/%d",
+                        stage.name, attempt, max_retries
+                    )
                 task = Task(
                     description=stage.role_prompt,
                     task_type=TaskType.CODING if stage.model_tier == "heavy" else TaskType.STANDARD,
@@ -116,6 +135,7 @@ class PipelineRunner:
                 )
 
                 last_spawn_result = spawn_result
+                spawn_attempts.append(spawn_result)
 
                 if spawn_result.status == "completed":
                     success = True
@@ -125,6 +145,7 @@ class PipelineRunner:
                     attempt += 1
 
             if success:
+                logger.debug("Stage '%s' completed successfully", stage.name)
                 stage.status = StageStatus.COMPLETED
                 stage.error = None
                 current_artifacts.update(stage.output_artifacts)
@@ -135,9 +156,24 @@ class PipelineRunner:
                     spawn_result=last_spawn_result,
                     error=None,
                     output_artifacts=list(stage.output_artifacts),
+                    attempt_chain=last_spawn_result.attempts if last_spawn_result else [],
+                    spawn_attempts=spawn_attempts,
+                    duration_ms=(time.perf_counter() - stage_started) * 1000,
                 )
                 stage_runs.append(stage_run)
             else:
+                logger.error(
+                    "Stage '%s' failed after %d attempts: %s",
+                    stage.name, attempt, last_error
+                )
+                # Log structured failure details for debugging
+                spawn_summary = ", ".join(
+                    f"{i+1}:{sr.status}" for i, sr in enumerate(spawn_attempts)
+                )
+                logger.error(
+                    "Stage '%s' spawn attempts: [%s]. Last error: %s",
+                    stage.name, spawn_summary, last_error
+                )
                 stage.status = StageStatus.FAILED
                 stage.error = last_error
                 # attempt 此时为已重试次数
@@ -149,6 +185,9 @@ class PipelineRunner:
                     spawn_result=last_spawn_result,
                     error=stage.error,
                     output_artifacts=[],
+                    attempt_chain=last_spawn_result.attempts if last_spawn_result else [],
+                    spawn_attempts=spawn_attempts,
+                    duration_ms=(time.perf_counter() - stage_started) * 1000,
                 )
                 stage_runs.append(stage_run)
 

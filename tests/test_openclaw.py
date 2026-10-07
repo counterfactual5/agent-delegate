@@ -8,6 +8,25 @@ from agent_delegate.adapters.openclaw import OpenClawAdapter, _MAX_CACHED_RUNS
 from agent_delegate.models.base import SpawnResult, WorkerOutput
 
 
+def test_spawn_success_returns_summary():
+    """spawn 成功时返回的 SpawnResult 应携带解析出的 summary"""
+    adapter = OpenClawAdapter()
+    fake = MagicMock(returncode=0, stdout="Summary line 1\nSummary line 2\nrun-123")
+    with patch("agent_delegate.adapters.openclaw.subprocess.run", return_value=fake):
+        result = adapter.spawn(task="t", model="m")
+    assert result.status == "completed"
+    assert result.run_id == "run-123"
+    assert result.summary == "Summary line 1\nSummary line 2"
+
+
+def test_send_timeout_does_not_raise():
+    """send 是尽力通知：超时/二进制缺失只记日志，不向调用方抛异常"""
+    adapter = OpenClawAdapter()
+    with patch("agent_delegate.adapters.openclaw.subprocess.run",
+               side_effect=subprocess.TimeoutExpired(cmd="openclaw", timeout=30)):
+        adapter.send("hello")  # 不应抛出
+
+
 def test_spawn_success_with_run_id_caches_and_listen_hits():
     adapter = OpenClawAdapter()
     mock_res = MagicMock()

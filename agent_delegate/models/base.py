@@ -6,6 +6,7 @@ Agent Delegate - Production-grade multi-agent orchestration
 不直接依赖 OpenClaw / LangChain / OpenAI 等任何具体实现。
 """
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -63,17 +64,33 @@ class ErrorClass(Enum):
 
 
 # 关键字 → 错误分级映射（按优先级匹配 error 文本）。
+# 数字签名带数字边界（"1503" 不会触发 "500"）；裸 "too long" 已从 CONTEXT_LENGTH 移除——
+# 它会误判延迟类措辞（"request took too long"，现归 TIMEOUT，并新增 "took too long" 签名），
+# 真实超长措辞改用 "prompt is too long" / "input is too long" 等更精确的签名。
 _ERROR_SIGNATURES: list[tuple[ErrorClass, tuple[str, ...]]] = [
     (ErrorClass.RATE_LIMIT, ("429", "rate limit", "ratelimit", "too many requests",
                              "quota", "配额", "限流")),
     (ErrorClass.AUTH, ("401", "403", "unauthorized", "forbidden", "invalid api key",
                        "api key", "认证", "鉴权", "密钥")),
-    (ErrorClass.CONTEXT_LENGTH, ("context length", "context_length", "token limit", 
-                                 "maximum context", "too long", "上下文长度", 
-                                 "令牌数超限", "exceeds context", "context window")),
-    (ErrorClass.TIMEOUT, ("timeout", "timed out", "deadline", "超时")),
+    (ErrorClass.CONTEXT_LENGTH, ("context length", "context_length", "token limit",
+                                 "maximum context", "上下文长度",
+                                 "令牌数超限", "exceeds context", "context window",
+                                 "prompt is too long", "input is too long",
+                                 "input too long", "too many tokens",
+                                 "payload too large", "request entity too large")),
+    (ErrorClass.TIMEOUT, ("timeout", "timed out", "deadline", "took too long", "超时")),
     (ErrorClass.SERVER_ERROR, ("500", "502", "503", "504", "internal server",
                                "bad gateway", "unavailable", "服务不可用")),
+]
+
+# 编译一次复用：数字签名加数字边界，短语签名按字面量匹配。
+_SIGNATURE_PATTERNS: list[tuple[ErrorClass, tuple[re.Pattern, ...]]] = [
+    (err_class, tuple(
+        re.compile(r"(?<!\d)" + re.escape(needle) + r"(?!\d)") if needle.isdigit()
+        else re.compile(re.escape(needle))
+        for needle in needles
+    ))
+    for err_class, needles in _ERROR_SIGNATURES
 ]
 
 
@@ -84,8 +101,8 @@ def classify_error(result: "SpawnResult") -> ErrorClass:
     text = (result.error or "").lower()
     if not text:
         return ErrorClass.UNKNOWN
-    for err_class, needles in _ERROR_SIGNATURES:
-        if any(n in text for n in needles):
+    for err_class, patterns in _SIGNATURE_PATTERNS:
+        if any(pattern.search(text) for pattern in patterns):
             return err_class
     return ErrorClass.UNKNOWN
 
@@ -100,6 +117,7 @@ class AttemptRecord:
     error_class: Optional[str] = None
     error: Optional[str] = None
     reason: Optional[str] = None
+    duration_ms: Optional[float] = None
 
     def __str__(self) -> str:
         if self.outcome == "ok":
@@ -107,6 +125,10 @@ class AttemptRecord:
         if self.outcome == "skip":
             reason_str = f" ({self.reason})" if self.reason else ""
             return f"skip {self.model}{reason_str}"
+        if self.outcome == "incomplete":
+            status_str = f" [{self.status}]" if self.status else ""
+            reason_str = f" ({self.reason})" if self.reason else ""
+            return f"incomplete {self.model}{status_str}{reason_str}"
         # outcome == "fail" or others
         err_cls = f" [{self.error_class}]" if self.error_class else ""
         err_msg = f" {self.error}" if self.error else ""
